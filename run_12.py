@@ -38,6 +38,7 @@ from tqdm import tqdm, trange
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler,TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
+import glob
 from transformers import (WEIGHTS_NAME, get_linear_schedule_with_warmup,
                           RobertaConfig, RobertaModel, RobertaTokenizer)
 MODEL_CLASSES = {'roberta': (RobertaConfig, RobertaModel, RobertaTokenizer)}
@@ -46,6 +47,7 @@ logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(messa
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
+
 class Example(object):
     """A single training/test example."""
     def __init__(self,
@@ -228,21 +230,8 @@ def main():
                         help="For distributed training: local_rank")   
     parser.add_argument('--seed', type=int, default=42,
                         help="random seed for initialization")
-    parser.add_argument(
-        "--checkpoint_dir",
-        type=str,
-        default="./checkpoints",
-        help="Directory to save checkpoints."
-    )
-    parser.add_argument(
-        "--save_steps",
-        type=int,
-        default=17000,
-        help="Save & load checkpoint every N steps."
-    )
     # print arguments
     args = parser.parse_args()
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
     logger.info(args)
 
     # Setup CUDA, GPU & distributed training
@@ -296,6 +285,13 @@ def main():
 
     if args.do_train:
         # Prepare training data loader
+        if args.load_model_path is None:
+             ckpts = sorted(glob.glob(os.path.join(args.output_dir, "checkpoint-step-*")))
+             if ckpts:
+                 latest = ckpts[-1]
+                 ckpt_file = os.path.join(latest, "pytorch_model.bin")
+                 logger.info(f"Auto-loading checkpoint from {ckpt_file}")
+                 model.load_state_dict(torch.load(ckpt_file, map_location=device)) 
         train_examples = read_examples(args.train_filename)
         train_features = convert_examples_to_features(train_examples, tokenizer,args,stage='train')
         all_source_ids = torch.tensor([f.source_ids for f in train_features], dtype=torch.long)
@@ -332,57 +328,50 @@ def main():
         
 
         model.train()
-        global_step = 0
-        tr_loss = 0.0
-        dev_dataset = {}
+        dev_dataset={}
+        nb_tr_examples, nb_tr_steps,tr_loss,global_step,best_bleu,best_loss = 0, 0,0,0,0,1e6 
+        bar = tqdm(range(num_train_optimization_steps),total=num_train_optimization_steps)
+        train_dataloader=cycle(train_dataloader)
         eval_flag = True
-
-        for step, batch in enumerate(train_dataloader, 1):
+        for step in bar:
+            batch = next(train_dataloader)
             batch = tuple(t.to(device) for t in batch)
-            source_ids, source_mask, target_ids, target_mask = batch
-        
-            # 1) forward
-            loss = model(
-                source_ids=source_ids,
-                source_mask=source_mask,
-                target_ids=target_ids,
-                target_mask=target_mask
-            )[0]
-        
-            # 2) multi-GPU / gradient accumulation
+            source_ids,source_mask,target_ids,target_mask = batch
+            loss,_,_ = model(source_ids=source_ids,source_mask=source_mask,target_ids=target_ids,target_mask=target_mask)
+            
             if args.n_gpu > 1:
-                loss = loss.mean()
-            loss = loss / args.gradient_accumulation_steps
-            loss.backward()
+                loss = loss.mean() # mean() to average on multi-gpu.
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
             tr_loss += loss.item()
-        
-            # 3) optimizer + scheduler update
-            if step % args.gradient_accumulation_steps == 0:
+            train_loss=round(tr_loss*args.gradient_accumulation_steps/(nb_tr_steps+1),4)
+            bar.set_description("loss {}".format(train_loss))
+            nb_tr_examples += source_ids.size(0)
+            nb_tr_steps += 1
+            loss.backward()
+
+            if (nb_tr_steps + 1) % args.gradient_accumulation_steps == 0:
+                #Update parameters
                 optimizer.step()
-                scheduler.step()
                 optimizer.zero_grad()
+                scheduler.step()
                 global_step += 1
-        
-                # 4) checkpoint every N updates
-                if global_step % args.save_steps == 0:
-                    ckpt_path = os.path.join(
-                        args.checkpoint_dir,
-                        f"checkpoint_step_{global_step}.pt"
-                    )
-                    torch.save({
-                        "step": global_step,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                    }, ckpt_path)
-                    print(f"✅ Saved checkpoint at global step {global_step}")
-                    # verify load
-                    checkpoint = torch.load(ckpt_path, map_location=device)
-                    model.load_state_dict(checkpoint["model_state_dict"])
-                    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-                    model.train()
-                    print(f"⟳ Loaded checkpoint from {ckpt_path}")
-                        
-            if args.do_eval and global_step % args.eval_steps == 0:
+
+                # --- (2) SAVE & LOAD checkpoint sau mỗi 17 000 bước ---
+                if global_step % 17000 == 0:
+                    ckpt_dir = os.path.join(args.output_dir, f"checkpoint-step-{global_step}")
+                    os.makedirs(ckpt_dir, exist_ok=True)
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    out_file = os.path.join(ckpt_dir, "pytorch_model.bin")
+                    torch.save(model_to_save.state_dict(), out_file)
+                    logger.info(f"Saved checkpoint at step {global_step} → {ckpt_dir}")
+
+                    # ngay lập tức load lại checkpoint mới
+                    model.load_state_dict(torch.load(out_file, map_location=device))
+                    logger.info(f"Loaded checkpoint from {ckpt_dir}")
+                eval_flag = True
+                
+            if args.do_eval and ((global_step + 1) %args.eval_steps == 0) and eval_flag:
                 #Eval model with dev dataset
                 tr_loss = 0
                 nb_tr_examples, nb_tr_steps = 0, 0                     
@@ -555,5 +544,3 @@ def main():
                 
 if __name__ == "__main__":
     main()
-
-
