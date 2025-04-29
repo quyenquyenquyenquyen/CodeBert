@@ -46,7 +46,6 @@ logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(messa
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
-
 class Example(object):
     """A single training/test example."""
     def __init__(self,
@@ -229,8 +228,21 @@ def main():
                         help="For distributed training: local_rank")   
     parser.add_argument('--seed', type=int, default=42,
                         help="random seed for initialization")
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="./checkpoints",
+        help="Directory to save checkpoints."
+    )
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=17000,
+        help="Save & load checkpoint every N steps."
+    )
     # print arguments
     args = parser.parse_args()
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
     logger.info(args)
 
     # Setup CUDA, GPU & distributed training
@@ -320,37 +332,57 @@ def main():
         
 
         model.train()
-        dev_dataset={}
-        nb_tr_examples, nb_tr_steps,tr_loss,global_step,best_bleu,best_loss = 0, 0,0,0,0,1e6 
-        bar = tqdm(range(num_train_optimization_steps),total=num_train_optimization_steps)
-        train_dataloader=cycle(train_dataloader)
+        global_step = 0
+        tr_loss = 0.0
+        dev_dataset = {}
         eval_flag = True
-        for step in bar:
-            batch = next(train_dataloader)
-            batch = tuple(t.to(device) for t in batch)
-            source_ids,source_mask,target_ids,target_mask = batch
-            loss,_,_ = model(source_ids=source_ids,source_mask=source_mask,target_ids=target_ids,target_mask=target_mask)
-            
-            if args.n_gpu > 1:
-                loss = loss.mean() # mean() to average on multi-gpu.
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
-            tr_loss += loss.item()
-            train_loss=round(tr_loss*args.gradient_accumulation_steps/(nb_tr_steps+1),4)
-            bar.set_description("loss {}".format(train_loss))
-            nb_tr_examples += source_ids.size(0)
-            nb_tr_steps += 1
-            loss.backward()
 
-            if (nb_tr_steps + 1) % args.gradient_accumulation_steps == 0:
-                #Update parameters
+        for step, batch in enumerate(train_dataloader, 1):
+            batch = tuple(t.to(device) for t in batch)
+            source_ids, source_mask, target_ids, target_mask = batch
+        
+            # 1) forward
+            loss = model(
+                source_ids=source_ids,
+                source_mask=source_mask,
+                target_ids=target_ids,
+                target_mask=target_mask
+            )[0]
+        
+            # 2) multi-GPU / gradient accumulation
+            if args.n_gpu > 1:
+                loss = loss.mean()
+            loss = loss / args.gradient_accumulation_steps
+            loss.backward()
+            tr_loss += loss.item()
+        
+            # 3) optimizer + scheduler update
+            if step % args.gradient_accumulation_steps == 0:
                 optimizer.step()
-                optimizer.zero_grad()
                 scheduler.step()
+                optimizer.zero_grad()
                 global_step += 1
-                eval_flag = True
-                
-            if args.do_eval and ((global_step + 1) %args.eval_steps == 0) and eval_flag:
+        
+                # 4) checkpoint every N updates
+                if global_step % args.save_steps == 0:
+                    ckpt_path = os.path.join(
+                        args.checkpoint_dir,
+                        f"checkpoint_step_{global_step}.pt"
+                    )
+                    torch.save({
+                        "step": global_step,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                    }, ckpt_path)
+                    print(f"✅ Saved checkpoint at global step {global_step}")
+                    # verify load
+                    checkpoint = torch.load(ckpt_path, map_location=device)
+                    model.load_state_dict(checkpoint["model_state_dict"])
+                    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                    model.train()
+                    print(f"⟳ Loaded checkpoint from {ckpt_path}")
+                        
+            if args.do_eval and global_step % args.eval_steps == 0:
                 #Eval model with dev dataset
                 tr_loss = 0
                 nb_tr_examples, nb_tr_steps = 0, 0                     
