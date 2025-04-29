@@ -1,3 +1,5 @@
+mkdir -p model/code2review_trans_data_task2
+
 CUDA_VISIBLE_DEVICES=0 python run_12.py --do_train --do_eval --model_type roberta      \
      	--model_name_or_path microsoft/codebert-base   \
  	    --train_filename ../../DATA/task2_data/trans_data/train.json       \
