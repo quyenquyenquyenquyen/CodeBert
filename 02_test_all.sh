@@ -1,5 +1,5 @@
 ## ---Trans Data ---
-mkdir model/code2review_trans_data_task2/out_beam5_hyp5/
+mkdir -p model/code2review_trans_data_task2/out_beam5_hyp5/
 CUDA_VISIBLE_DEVICES=0 python run2_12.py --do_test --model_type roberta      \
      	--model_name_or_path microsoft/codebert-base   \
  	    --test_filename ../../DATA/task2_data/trans_data/test.json       \
