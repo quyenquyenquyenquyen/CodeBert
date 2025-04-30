@@ -357,8 +357,8 @@ def main():
                 scheduler.step()
                 global_step += 1
 
-                # --- (2) SAVE & LOAD checkpoint sau mỗi 17 000 bước ---
-                if global_step % 17000 == 0:
+                # --- (2) SAVE & LOAD checkpoint sau mỗi 15 000 bước ---
+                if global_step % 15000 == 0:
                     ckpt_dir = os.path.join(args.output_dir, f"checkpoint-step-{global_step}")
                     os.makedirs(ckpt_dir, exist_ok=True)
                     model_to_save = model.module if hasattr(model, 'module') else model
