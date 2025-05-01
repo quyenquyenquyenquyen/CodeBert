@@ -329,8 +329,27 @@ def main():
 
         model.train()
         dev_dataset={}
-        nb_tr_examples, nb_tr_steps,tr_loss,global_step,best_bleu,best_loss = 0, 0,0,0,0,1e6 
-        bar = tqdm(range(num_train_optimization_steps),total=num_train_optimization_steps)
+        # ---- resume logic ----
+        # khởi tạo counters
+        best_bleu, best_loss = 0, 1e6
+        tr_loss = 0
+        # parse step từ load_model_path nếu có dạng 'checkpoint-step-XXXXX'
+        resume_step = 0
+        if args.load_model_path is not None and 'checkpoint-step' in args.load_model_path:
+             import re
+             m = re.search(r'checkpoint-step-(\d+)', args.load_model_path)
+             if m:
+                 resume_step = int(m.group(1))
+                 logger.info(f"→ Resuming from step {resume_step}")
+         # gán các biến bước
+         global_step = resume_step
+         nb_tr_steps = resume_step
+         nb_tr_examples = resume_step * args.train_batch_size
+         # tạo progress-bar bắt đầu từ resume_step
+         bar = tqdm(range(num_train_optimization_steps),
+                    initial=global_step,
+                    total=num_train_optimization_steps,
+                    desc="training")
         train_dataloader=cycle(train_dataloader)
         eval_flag = True
         for step in bar:
