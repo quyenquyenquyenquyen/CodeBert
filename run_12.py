@@ -304,7 +304,12 @@ def main():
             train_sampler = RandomSampler(train_data)
         else:
             train_sampler = DistributedSampler(train_data)
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size//args.gradient_accumulation_steps)
+        train_dataloader = DataLoader(
+            train_data,
+            sampler=train_sampler,
+            batch_size=args.train_batch_size//args.gradient_accumulation_steps,
+            drop_last=True         # bỏ phần còn lại nhỏ hơn batch_size
+        )
 
         num_train_optimization_steps =  args.train_steps
 
@@ -374,6 +379,11 @@ def main():
                 optimizer.zero_grad()
                 scheduler.step()
                 global_step += 1
+
+                # ⇒ dừng ngay khi đạt args.train_steps
+                if global_step >= args.train_steps:
+                    logger.info(f"Reached {args.train_steps} steps. Stopping training.")
+                    break
 
                 # --- (2) SAVE & LOAD checkpoint sau mỗi 10 000 bước ---
                 if global_step % 10000 == 0:
