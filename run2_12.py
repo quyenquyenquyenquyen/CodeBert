@@ -476,49 +476,134 @@ def main():
             files.append(args.dev_filename)
         if args.test_filename is not None:
             files.append(args.test_filename)
-        for idx,file in enumerate(files):   
+        for idx,file in enumerate(files):
             logger.info("Test file: {}".format(file))
             eval_examples = read_examples(file)
             eval_features = convert_examples_to_features(eval_examples, tokenizer, args,stage='test')
             all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
-            all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)    
-            eval_data = TensorDataset(all_source_ids,all_source_mask)   
+            all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
+            eval_data = TensorDataset(all_source_ids,all_source_mask)
 
             # Calculate bleu
             eval_sampler = SequentialSampler(eval_data)
             eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-            model.eval() 
-            p=[]
+            model.eval()
+            p=[] # Danh sách các dự đoán
             for batch in tqdm(eval_dataloader,total=len(eval_dataloader)):
+                batch = tuple(t.to(device) for t in batch)
+                source_ids,source_mask= batch
+                with torch.no_grad():
+                    preds = model(source_ids=source_ids,source_mask=source_mask)
+                    for pred in preds:
+                        # Xử lý beam search output (lấy ứng viên tốt nhất hoặc gộp lại)
+                        # Hiện tại, code đang gộp nhiều ứng viên bằng '\t'
+                        # Để tính EM, chúng ta nên lấy ứng viên tốt nhất (đầu tiên)
+                        # hoặc nếu bạn muốn EM trên các dự đoán đã gộp thì giữ nguyên.
+                        # Giả sử chúng ta muốn EM trên ứng viên tốt nhất từ beam.
+                        best_candidate_text = ""
+                        if pred.ndim > 1 and pred.shape[0] > 0: # Kiểm tra xem có nhiều beam output không
+                            first_beam_output = pred[0] # Lấy beam đầu tiên (thường là tốt nhất)
+                            t = first_beam_output.cpu().numpy()
+                            t = list(t)
+                            if 0 in t: # eos_token_id (thường là 0 hoặc tokenizer.eos_token_id)
+                               t = t[:t.index(0)]
+                            best_candidate_text = tokenizer.decode(t,clean_up_tokenization_spaces=False)
+                        elif pred.ndim == 1 : # Trường hợp beam_size = 1 hoặc model trả về 1D tensor
+                            t = pred.cpu().numpy()
+                            t = list(t)
+                            if 0 in t:
+                               t = t[:t.index(0)]
+                            best_candidate_text = tokenizer.decode(t,clean_up_tokenization_spaces=False)
+                        else: # Fallback nếu cấu trúc pred không như mong đợi
+                            candit = []
+                            for single_pred_in_beam in pred: # Lặp qua các beam (nếu có)
+                                t=single_pred_in_beam.cpu().numpy()
+                                t=list(t)
+                                if 0 in t:
+                                   t=t[:t.index(0)]
+                                text = tokenizer.decode(t,clean_up_tokenization_spaces=False)
+                                candit.append(text)
+                            if candit:
+                                best_candidate_text = candit[0] # Lấy ứng viên đầu tiên làm best_candidate
+
+                        p.append(best_candidate_text) # Chỉ thêm ứng viên tốt nhất để tính EM
+
+            model.train() # Chuyển model về chế độ train (nếu cần cho các bước sau)
+
+            predictions_for_bleu=[] # Dùng cho việc ghi file và tính BLEU (có thể vẫn giữ dạng gộp)
+            # Tạo lại predictions_for_bleu với format gộp nếu cần, hoặc chỉ dùng p (ứng viên tốt nhất)
+            # Đoạn này có thể cần điều chỉnh tùy thuộc bạn muốn file output chứa gì
+            # Giả sử bạn vẫn muốn file output chứa các candidates gộp (nếu beam_size > 1)
+            # Còn p sẽ chứa single best candidate để tính EM
+            
+            # Viết file output và gold
+            output_file_path = os.path.join(args.output_dir,"test_{}.output".format(str(idx)))
+            gold_file_path = os.path.join(args.output_dir,"test_{}.gold".format(str(idx)))
+
+            # Để tính BLEU, chúng ta cần file output có định dạng phù hợp.
+            # Nếu preds trả về nhiều beam, code gốc gộp chúng. Chúng ta sẽ tái tạo điều đó cho file output.
+            # Còn 'p' sẽ dùng để tính EM (single best prediction).
+            
+            # Tạo lại output cho file (giữ nguyên logic gộp nếu có nhiều beam)
+            # Điều này hơi phức tạp nếu model() trả về cấu trúc khác nhau.
+            # Để đơn giản, nếu bạn muốn file .output cũng chỉ có best candidate,
+            # thì có thể dùng trực tiếp 'p'.
+            # Nếu muốn giữ logic cũ cho file .output:
+            p_for_file = []
+            model.eval() # Đặt lại model.eval() để đảm bảo model.generate (hoặc tương đương) hoạt động đúng
+            temp_dataloader = DataLoader(eval_data, sampler=SequentialSampler(eval_data), batch_size=args.eval_batch_size) # Tạo lại dataloader tạm thời
+            for batch in temp_dataloader: # Lặp lại để lấy preds gốc cho việc ghi file
                 batch = tuple(t.to(device) for t in batch)
                 source_ids,source_mask= batch                  
                 with torch.no_grad():
-                    preds = model(source_ids=source_ids,source_mask=source_mask)  
-                    for pred in preds:
-                        #print('single pred',pred.size())
+                    preds_for_file = model(source_ids=source_ids,source_mask=source_mask)  
+                    for pred_beam_group in preds_for_file:
                         candit = []
-                        for single_pred in pred:
-                            t=single_pred.cpu().numpy()
+                        for single_pred_in_beam in pred_beam_group:
+                            t=single_pred_in_beam.cpu().numpy()
                             t=list(t)
                             if 0 in t:
                                t=t[:t.index(0)]
                             text = tokenizer.decode(t,clean_up_tokenization_spaces=False)
                             candit.append(text)
-                        candit_text = '\t'.join(candit)
-                        p.append(candit_text)
+                        candit_text = '\t'.join(candit) # Gộp lại bằng tab
+                        p_for_file.append(candit_text)
             model.train()
-            predictions=[]
-            with open(os.path.join(args.output_dir,"test_{}.output".format(str(idx))),'w') as f, open(os.path.join(args.output_dir,"test_{}.gold".format(str(idx))),'w') as f1:
-                for ref,gold in zip(p,eval_examples):
-                    predictions.append(str(gold.idx)+'\t'+ref)
-                    f.write(str(gold.idx)+'\t'+ref+'\n')
-                    f1.write(str(gold.idx)+'\t'+gold.target+'\n')     
 
-            (goldMap, predictionMap) = bleu.computeMaps(predictions, os.path.join(args.output_dir, "test_{}.gold".format(idx))) 
+
+            with open(output_file_path,'w', encoding='utf-8') as f, \
+                 open(gold_file_path,'w', encoding='utf-8') as f1:
+                for ref_for_file, gold in zip(p_for_file, eval_examples):
+                    predictions_for_bleu.append(str(gold.idx)+'\t'+ref_for_file)
+                    f.write(str(gold.idx)+'\t'+ref_for_file+'\n')
+                    f1.write(str(gold.idx)+'\t'+gold.target+'\n')
+
+            # Tính BLEU
+            (goldMap, predictionMap) = bleu.computeMaps(predictions_for_bleu, gold_file_path)
             dev_bleu=round(bleu.bleuFromMaps(goldMap, predictionMap)[0],2)
-            logger.info("  %s = %s "%("bleu-4",str(dev_bleu)))
-            logger.info("  "+"*"*20)    
+
+            # Tính EM
+            match_count = 0
+            if len(p) == len(eval_examples):
+                for pred_text, gold_example in zip(p, eval_examples):
+                    # Chuẩn hóa text (loại bỏ khoảng trắng thừa ở đầu/cuối)
+                    # Bạn có thể cần thêm các bước chuẩn hóa khác (ví dụ: lowercasing) tùy theo yêu cầu
+                    pred_clean = pred_text.strip()
+                    gold_clean = gold_example.target.strip()
+                    if pred_clean == gold_clean:
+                        match_count += 1
+                exact_match_score = (match_count / len(eval_examples)) * 100 if len(eval_examples) > 0 else 0
+            else:
+                logger.warning(f"Number of predictions ({len(p)}) and gold examples ({len(eval_examples)}) do not match for EM calculation.")
+                exact_match_score = 0.0
+
+
+            logger.info("  Results for test_{}.output".format(str(idx)))
+            logger.info("  BLEU-4 = %s", str(dev_bleu))
+            logger.info("  EM = %.2f%%", exact_match_score) # In EM với 2 chữ số thập phân
+            logger.info("  "+"*"*20)
+  
 
 
 
