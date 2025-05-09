@@ -20,7 +20,7 @@ using a masked language modeling (MLM) loss.
 """
 
 from __future__ import absolute_import
-import os # <<-- THÊM IMPORT NÀY
+import os
 import sys
 import bleu # Đảm bảo module bleu này tồn tại và hoạt động đúng
 import pickle
@@ -37,8 +37,8 @@ from model import Seq2Seq # Đảm bảo file model.py tồn tại và có class
 from tqdm import tqdm, trange
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler,TensorDataset
 from torch.utils.data.distributed import DistributedSampler
-# from torch.optim import Adam
-from torch.optim import AdamW # Sử dụng AdamW từ transformers thường tốt hơn
+from torch.optim import AdamW 
+import glob
 from transformers import (WEIGHTS_NAME, get_linear_schedule_with_warmup,
                           RobertaConfig, RobertaModel, RobertaTokenizer)
 MODEL_CLASSES = {'roberta': (RobertaConfig, RobertaModel, RobertaTokenizer)}
@@ -62,37 +62,38 @@ class Example(object):
 def read_examples(filename):
     """Read examples from filename."""
     examples=[]
-    try: # Thêm try-except để bắt lỗi đọc file
+    try:
         with open(filename,encoding="utf-8") as f:
             for idx, line in enumerate(f):
-                try: # Thêm try-except cho mỗi dòng JSON
+                try:
                     line=line.strip()
                     js=json.loads(line)
-                    if 'idx' not in js:
-                        js['idx']=idx
-                    # Kiểm tra key tồn tại trước khi truy cập
+                    current_idx = js.get('idx', idx) 
+
                     code_tokens = js.get('code_tokens', [])
                     docstring_tokens = js.get('docstring_tokens', [])
 
                     code=' '.join(code_tokens).replace('\n',' ')
                     code=' '.join(code.strip().split())
                     nl=' '.join(docstring_tokens).replace('\n','')
-                    nl=' '.join(nl.strip().split())
+                    nl=' '.join(nl.strip().split())            
                     examples.append(
                         Example(
-                                idx = js['idx'], # Sử dụng idx từ json nếu có
+                                idx = current_idx,
                                 source=code,
                                 target = nl,
-                                )
+                                ) 
                     )
                 except json.JSONDecodeError:
                     logger.warning(f"Skipping invalid JSON line {idx+1} in {filename}: {line[:100]}...")
                 except KeyError as e:
                      logger.warning(f"Skipping line {idx+1} due to missing key {e} in {filename}: {line[:100]}...")
     except FileNotFoundError:
-         logger.error(f"Error: File not found at {filename}")
-         return [] # Trả về danh sách rỗng nếu file không tồn tại
-
+         logger.error(f"Error: File not found at {filename}. Returning empty list.")
+         return []
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while reading {filename}: {e}", exc_info=True)
+        return []
     return examples
 
 
@@ -110,7 +111,8 @@ class InputFeatures(object):
         self.source_ids = source_ids
         self.target_ids = target_ids
         self.source_mask = source_mask
-        self.target_mask = target_mask
+        self.target_mask = target_mask       
+        
 
 
 def convert_examples_to_features(examples, tokenizer, args,stage=None):
@@ -119,32 +121,29 @@ def convert_examples_to_features(examples, tokenizer, args,stage=None):
         #source
         source_tokens = tokenizer.tokenize(example.source)[:args.max_source_length-2]
         source_tokens =[tokenizer.cls_token]+source_tokens+[tokenizer.sep_token]
-        source_ids =  tokenizer.convert_tokens_to_ids(source_tokens)
+        source_ids =  tokenizer.convert_tokens_to_ids(source_tokens) 
         source_mask = [1] * (len(source_tokens))
         padding_length = args.max_source_length - len(source_ids)
         source_ids+=[tokenizer.pad_token_id]*padding_length
         source_mask+=[0]*padding_length
-
+ 
         #target
         if stage=="test":
-             # Nên có target rỗng hoặc một token đặc biệt thay vì "None"
-             # target_tokens = tokenizer.tokenize("")[:args.max_target_length-2]
-            target_tokens = [] # Target rỗng cho test
+            target_tokens = [] 
         else:
             target_tokens = tokenizer.tokenize(example.target)[:args.max_target_length-2]
-
-        target_tokens = [tokenizer.cls_token]+target_tokens+[tokenizer.sep_token]
+        target_tokens = [tokenizer.cls_token]+target_tokens+[tokenizer.sep_token]            
         target_ids = tokenizer.convert_tokens_to_ids(target_tokens)
         target_mask = [1] *len(target_ids)
         padding_length = args.max_target_length - len(target_ids)
         target_ids+=[tokenizer.pad_token_id]*padding_length
-        target_mask+=[0]*padding_length
-
-        # Bỏ bớt log không cần thiết trong vòng lặp này để tránh quá nhiều output
-        # if example_index < 5:
-        #     if stage=='train':
-        #         # ... (logging) ...
-
+        target_mask+=[0]*padding_length   
+   
+        # if example_index < 0: # Tắt log này
+            # if stage=='train':
+                # logger.info("*** Example ***")
+                # ...
+       
         features.append(
             InputFeatures(
                  example_index,
@@ -165,49 +164,49 @@ def set_seed(args):
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
-
+        
 def main():
     parser = argparse.ArgumentParser()
 
-    ## Required parameters
+    ## Required parameters  
     parser.add_argument("--model_type", default=None, type=str, required=True,
                         help="Model type: e.g. roberta")
     parser.add_argument("--model_name_or_path", default=None, type=str, required=True,
-                        help="Path to pre-trained model: e.g. roberta-base" )
+                        help="Path to pre-trained model: e.g. roberta-base" )   
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
-    parser.add_argument("--load_model_path", default=None, type=str,
-                        help="Path to trained model: Should contain the .bin files" )
+    parser.add_argument("--load_model_path", default=None, type=str, 
+                        help="Path to trained model: Should contain the .bin files" )    
     ## Other parameters
-    parser.add_argument("--train_filename", default=None, type=str,
+    parser.add_argument("--train_filename", default=None, type=str, 
                         help="The train filename. Should contain the .jsonl files for this task.")
-    parser.add_argument("--dev_filename", default=None, type=str,
+    parser.add_argument("--dev_filename", default=None, type=str, 
                         help="The dev filename. Should contain the .jsonl files for this task.")
-    parser.add_argument("--test_filename", default=None, type=str,
-                        help="The test filename. Should contain the .jsonl files for this task.")
-
+    parser.add_argument("--test_filename", default=None, type=str, 
+                        help="The test filename. Should contain the .jsonl files for this task.")  
+    
     parser.add_argument("--config_name", default="", type=str,
                         help="Pretrained config name or path if not the same as model_name")
     parser.add_argument("--tokenizer_name", default="", type=str,
-                        help="Pretrained tokenizer name or path if not the same as model_name")
+                        help="Pretrained tokenizer name or path if not the same as model_name") 
     parser.add_argument("--max_source_length", default=64, type=int,
                         help="The maximum total source sequence length after tokenization. Sequences longer "
                              "than this will be truncated, sequences shorter will be padded.")
     parser.add_argument("--max_target_length", default=32, type=int,
                         help="The maximum total target sequence length after tokenization. Sequences longer "
                              "than this will be truncated, sequences shorter will be padded.")
-
+    
     parser.add_argument("--do_train", action='store_true',
                         help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true',
                         help="Whether to run eval on the dev set.")
     parser.add_argument("--do_test", action='store_true',
-                        help="Whether to run eval on the test set.") # Sửa comment
+                        help="Whether to run eval on the test set.")
     parser.add_argument("--do_lower_case", action='store_true',
                         help="Set this flag if you are using an uncased model.")
     parser.add_argument("--no_cuda", action='store_true',
-                        help="Avoid using CUDA when available")
-
+                        help="Avoid using CUDA when available") 
+    
     parser.add_argument("--train_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for training.")
     parser.add_argument("--eval_batch_size", default=8, type=int,
@@ -217,7 +216,7 @@ def main():
     parser.add_argument("--learning_rate", default=5e-5, type=float,
                         help="The initial learning rate for Adam.")
     parser.add_argument("--beam_size", default=10, type=int,
-                        help="beam size for beam search")
+                        help="beam size for beam search")    
     parser.add_argument("--weight_decay", default=0.0, type=float,
                         help="Weight deay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float,
@@ -235,7 +234,7 @@ def main():
     parser.add_argument("--warmup_steps", default=0, type=int,
                         help="Linear warmup over warmup_steps.")
     parser.add_argument("--local_rank", type=int, default=-1,
-                        help="For distributed training: local_rank")
+                        help="For distributed training: local_rank")   
     parser.add_argument('--seed', type=int, default=42,
                         help="random seed for initialization")
     # print arguments
@@ -251,41 +250,48 @@ def main():
         device = torch.device("cuda", args.local_rank)
         torch.distributed.init_process_group(backend='nccl')
         args.n_gpu = 1
-    logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s",
-                    args.local_rank, device, args.n_gpu, bool(args.local_rank != -1))
+    logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, PyTorch Cuda Available: %s",
+                    args.local_rank, device, args.n_gpu, bool(args.local_rank != -1), torch.cuda.is_available())
     args.device = device
     # Set seed
     set_seed(args)
     # make dir if output_dir not exist
     if os.path.exists(args.output_dir) is False:
         os.makedirs(args.output_dir)
-
+        
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path)
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,do_lower_case=args.do_lower_case)
-
-    #budild model
-    encoder = model_class.from_pretrained(args.model_name_or_path,config=config)
+    
+    #build model
+    encoder = model_class.from_pretrained(args.model_name_or_path,config=config)    
     decoder_layer = nn.TransformerDecoderLayer(d_model=config.hidden_size, nhead=config.num_attention_heads)
-    decoder = nn.TransformerDecoder(decoder_layer, num_layers=12) # Số layer decoder có thể cần điều chỉnh
+    decoder = nn.TransformerDecoder(decoder_layer, num_layers=6) # Sửa lại num_layers=6 cho phù hợp với encoder-decoder
     model=Seq2Seq(encoder=encoder,decoder=decoder,config=config,
                   beam_size=args.beam_size,max_length=args.max_target_length,
                   sos_id=tokenizer.cls_token_id,eos_id=tokenizer.sep_token_id)
-
+    
     if args.load_model_path is not None:
-        logger.info("reload model from {}".format(args.load_model_path))
-        try: # Thêm try-except để bắt lỗi load model
-            model.load_state_dict(torch.load(args.load_model_path, map_location=args.device))
-            logger.info("Model loaded successfully.")
+        logger.info("Reloading model from {}".format(args.load_model_path))
+        print(f"DEBUG: Attempting to load model from {args.load_model_path} onto device {args.device}", flush=True)
+        try:
+            # SỬA Ở ĐÂY: Thêm map_location=args.device
+            loaded_state_dict = torch.load(args.load_model_path, map_location=args.device)
+            model.load_state_dict(loaded_state_dict) # Giả sử args.load_model_path trỏ trực tiếp đến state_dict
+            logger.info("Model reloaded successfully from {} using map_location.".format(args.load_model_path))
+            print(f"DEBUG: Model successfully loaded from {args.load_model_path}", flush=True)
         except FileNotFoundError:
             logger.error(f"Model file not found at {args.load_model_path}. Exiting.")
             sys.exit(1)
+        except RuntimeError as e:
+            logger.error(f"RuntimeError loading model state dict from {args.load_model_path}: {e}", exc_info=True)
+            logger.error("This might be due to a mismatch in model architecture or the checkpoint being saved on a different device type without proper mapping during load.")
+            sys.exit(1)
         except Exception as e:
-            logger.error(f"Error loading model state dict from {args.load_model_path}: {e}", exc_info=True)
-            # Có thể bạn muốn thoát ở đây hoặc tiếp tục với model chưa train
-            # sys.exit(1)
-
-    model.to(device)
+            logger.error(f"An unexpected error occurred while loading model from {args.load_model_path}: {e}", exc_info=True)
+            sys.exit(1)
+        
+    model.to(args.device)
     if args.local_rank != -1:
         # Distributed training
         try:
@@ -298,41 +304,62 @@ def main():
         # multi-gpu training
         model = torch.nn.DataParallel(model)
 
-    # --- Phần Training (Giữ nguyên logic gốc) ---
     if args.do_train:
-        # ... (code training giữ nguyên như file gốc của bạn) ...
         # Prepare training data loader
+        if args.load_model_path and 'checkpoint-step' in args.load_model_path and os.path.exists(args.load_model_path):
+            logger.info(f"Training is resuming/continuing from a loaded model: {args.load_model_path}")
+            import re
+            m = re.search(r'checkpoint-step-(\d+)', args.load_model_path)
+            resume_step = 0
+            if m:
+                resume_step = int(m.group(1))
+                logger.info(f"Extracted resume_step: {resume_step} from {args.load_model_path}")
+            global_step = resume_step
+            nb_tr_steps_resumed = resume_step # Đổi tên để rõ ràng hơn
+        else:
+            global_step = 0
+            nb_tr_steps_resumed = 0
+            logger.info("Starting training from scratch or from a non-step checkpoint.")
+
+
         train_examples = read_examples(args.train_filename)
+        if not train_examples:
+            logger.error(f"No training examples found in {args.train_filename}. Exiting.")
+            sys.exit(1)
+
         train_features = convert_examples_to_features(train_examples, tokenizer,args,stage='train')
         all_source_ids = torch.tensor([f.source_ids for f in train_features], dtype=torch.long)
         all_source_mask = torch.tensor([f.source_mask for f in train_features], dtype=torch.long)
         all_target_ids = torch.tensor([f.target_ids for f in train_features], dtype=torch.long)
-        all_target_mask = torch.tensor([f.target_mask for f in train_features], dtype=torch.long)
+        all_target_mask = torch.tensor([f.target_mask for f in train_features], dtype=torch.long)    
         train_data = TensorDataset(all_source_ids,all_source_mask,all_target_ids,all_target_mask)
-
+        
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
             train_sampler = DistributedSampler(train_data)
-        # Đảm bảo batch size hợp lệ
-        train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
-        if train_batch_size == 0:
-            logger.error("Effective batch size is zero. Check train_batch_size and gradient_accumulation_steps.")
-            train_batch_size = 1 # Đặt giá trị tối thiểu để tránh lỗi chia cho 0
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=train_batch_size)
+        
+        actual_train_batch_size = args.train_batch_size//args.gradient_accumulation_steps
+        if actual_train_batch_size == 0:
+            logger.warning("Effective batch size is 0. Setting to 1.")
+            actual_train_batch_size = 1
+
+        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=actual_train_batch_size, drop_last=True)
 
 
-        # Xác định num_train_optimization_steps
-        if args.max_steps > 0:
-             num_train_optimization_steps = args.max_steps
-             args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
-        else:
-             num_train_optimization_steps = int(len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs)
-             if args.train_steps > 0: # Ưu tiên train_steps nếu được cung cấp
-                 num_train_optimization_steps = args.train_steps
+        if args.train_steps > 0 : # Ưu tiên train_steps nếu được cung cấp
+            num_train_optimization_steps = args.train_steps
+        elif args.max_steps > 0: # Sau đó là max_steps
+            num_train_optimization_steps = args.max_steps
+        else: # Tính theo num_train_epochs nếu không có train_steps hay max_steps
+            num_train_optimization_steps = int(len(train_dataloader) * args.num_train_epochs / args.gradient_accumulation_steps)
+
+        if num_train_optimization_steps <= global_step and args.train_steps > 0 : # Nếu global_step đã đạt/vượt train_steps
+             logger.info(f"Global step {global_step} already reached or exceeded train_steps {args.train_steps}. No further training will occur unless train_steps is increased.")
+             # Có thể muốn thoát ở đây nếu không có gì để train
+             # sys.exit(0)
 
 
-        # Prepare optimizer and schedule (linear warmup and decay)
         no_decay = ['bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
             {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
@@ -342,361 +369,360 @@ def main():
         optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps,
                                                     num_training_steps=num_train_optimization_steps)
-
-
-        #Start training
+    
+        
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
-        logger.info("  Num Epochs = %d", int(args.num_train_epochs)) # Sử dụng num_train_epochs đã tính toán lại nếu cần
-        logger.info("  Instantaneous batch size per GPU = %d", train_batch_size) # Batch size thực tế mỗi step
+        logger.info("  Instantaneous batch size per GPU = %d", actual_train_batch_size)
         logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
                        args.train_batch_size * (torch.distributed.get_world_size() if args.local_rank != -1 else 1))
         logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
         logger.info("  Total optimization steps = %d", num_train_optimization_steps)
-
+        logger.info("  Starting/Resuming from global step = %d", global_step)
+        
 
         model.train()
         dev_dataset={}
-        nb_tr_examples, nb_tr_steps,tr_loss,global_step,best_bleu,best_loss = 0, 0,0,0,0,1e6
-        # Sửa lại logic vòng lặp để dựa trên epoch hoặc steps
-        if args.max_steps <= 0: # Lặp theo epoch
-            train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
-            global_step = 0 # Reset global_step nếu lặp theo epoch
-        else: # Lặp theo step
-             train_iterator = trange(num_train_optimization_steps, desc="Step", disable=args.local_rank not in [-1, 0])
-             # global_step được tính trong vòng lặp step
-
-        train_dataloader_iter=cycle(train_dataloader)
+        nb_tr_examples, tr_loss = 0, 0.0 # nb_tr_steps không còn cần thiết theo cách này
+        best_bleu,best_loss = 0,1e6 
+        
+        # Thanh tiến trình chạy từ global_step đến num_train_optimization_steps
+        # range(global_step, num_train_optimization_steps) sẽ rỗng nếu global_step >= num_train_optimization_steps
+        bar = tqdm(range(global_step, num_train_optimization_steps), total=num_train_optimization_steps, initial=global_step, desc="Training")
+        
+        train_dataloader_iter=cycle(train_dataloader) # Đổi tên để tránh nhầm lẫn
         eval_flag = True
 
-        for epoch_or_step in train_iterator: # Lặp qua epoch hoặc step tùy cấu hình
-            if args.max_steps <=0: # Nếu lặp theo epoch, cần lặp qua dataloader bên trong
-                 epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-                 for step, batch in enumerate(epoch_iterator):
-                      model.train() # Đảm bảo model ở chế độ train
-                      batch = tuple(t.to(device) for t in batch)
-                      source_ids,source_mask,target_ids,target_mask = batch
-                      loss,_,_ = model(source_ids=source_ids,source_mask=source_mask,target_ids=target_ids,target_mask=target_mask)
+        if global_step >= num_train_optimization_steps:
+            logger.info(f"Global step {global_step} already meets or exceeds total optimization steps {num_train_optimization_steps}. Skipping training loop.")
 
-                      if args.n_gpu > 1:
-                          loss = loss.mean()
-                      if args.gradient_accumulation_steps > 1:
-                          loss = loss / args.gradient_accumulation_steps
+        for current_step_in_bar in bar: # current_step_in_bar sẽ chạy từ global_step đến num_train_optimization_steps - 1
+            batch = next(train_dataloader_iter)
+            batch = tuple(t.to(device) for t in batch)
+            source_ids,source_mask,target_ids,target_mask = batch
+            loss,_,_ = model(source_ids=source_ids,source_mask=source_mask,target_ids=target_ids,target_mask=target_mask)
+            
+            if args.n_gpu > 1:
+                loss = loss.mean() 
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
+            
+            loss.backward()
+            tr_loss += loss.item()
+            
+            # nb_tr_examples theo dõi số lượng mẫu đã xử lý trong lần chạy này
+            nb_tr_examples += source_ids.size(0) 
+            
+            if (current_step_in_bar + 1) % args.gradient_accumulation_steps == 0:
+                #Update parameters
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                global_step += 1 # global_step là tổng số lần optimizer đã step
+                eval_flag = True
+                
+                # Hiển thị loss của batch hiện tại hoặc loss trung bình tích lũy
+                # train_loss_display = tr_loss / ((current_step_in_bar - global_step + 1) / args.gradient_accumulation_steps + 1e-6) # Trung bình từ khi resume/bắt đầu
+                train_loss_display = loss.item() # Loss của batch hiện tại (sau khi chia cho accumulation)
+                bar.set_description("Step {}/{} loss {:.4f}".format(global_step, num_train_optimization_steps, train_loss_display))
 
-                      loss.backward()
-                      tr_loss += loss.item()
+                # --- (2) SAVE & LOAD checkpoint sau mỗi 10 000 bước ---
+                if global_step % 10000 == 0 and args.local_rank in [-1, 0]:
+                    ckpt_dir = os.path.join(args.output_dir, f"checkpoint-step-{global_step}")
+                    os.makedirs(ckpt_dir, exist_ok=True)
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    out_file = os.path.join(ckpt_dir, "pytorch_model.bin")
+                    torch.save(model_to_save.state_dict(), out_file)
+                    logger.info(f"Saved checkpoint at step {global_step} to {out_file}")
 
-                      if (step + 1) % args.gradient_accumulation_steps == 0:
-                          torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm) # Thêm clip grad norm
-                          optimizer.step()
-                          scheduler.step()
-                          optimizer.zero_grad()
-                          global_step += 1
-                          eval_flag = True
+                    # Tải lại checkpoint ngay lập tức (có thể không cần thiết trừ khi có lý do đặc biệt)
+                    # logger.info(f"Reloading checkpoint from {out_file}")
+                    # model_to_load = model.module if hasattr(model, 'module') else model # Lấy model gốc
+                    # model_to_load.load_state_dict(torch.load(out_file, map_location=args.device))
+                    # logger.info(f"Loaded checkpoint from {out_file}")
+                
+            if args.do_eval and args.local_rank in [-1, 0] and (global_step % args.eval_steps == 0) and eval_flag:
+                eval_flag=False    
+                # ... (Logic evaluation PPL và BLEU như đã sửa ở trên) ...
+                # Eval model with dev dataset
+                # tr_loss = 0 # Reset tr_loss sau mỗi eval để tính avg loss cho khoảng giữa các eval
+                # nb_tr_examples, nb_tr_steps = 0, 0 # Reset nb_tr_steps
+                
+                if 'dev_loss' in dev_dataset:
+                    eval_examples,eval_data=dev_dataset['dev_loss']
+                else:
+                    eval_examples = read_examples(args.dev_filename)
+                    if not eval_examples: logger.warning(f"No dev examples for PPL eval from {args.dev_filename}"); continue
+                    eval_features = convert_examples_to_features(eval_examples, tokenizer, args,stage='dev')
+                    all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
+                    all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
+                    all_target_ids = torch.tensor([f.target_ids for f in eval_features], dtype=torch.long)
+                    all_target_mask = torch.tensor([f.target_mask for f in eval_features], dtype=torch.long)      
+                    eval_data = TensorDataset(all_source_ids,all_source_mask,all_target_ids,all_target_mask)   
+                    dev_dataset['dev_loss']=eval_examples,eval_data
+                
+                eval_sampler = SequentialSampler(eval_data)
+                eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+                
+                logger.info("\n***** Running PPL evaluation on Dev Set *****")
+                logger.info("  Num examples = %d", len(eval_examples))
+                logger.info("  Batch size = %d", args.eval_batch_size)
 
-                          # Log loss trung bình cho epoch hiện tại
-                          train_loss_avg = tr_loss / global_step if global_step > 0 else 0
-                          epoch_iterator.set_description(f"Epoch {epoch_or_step} Iteration Loss: {loss.item():.4f}, Avg Loss: {train_loss_avg:.4f}")
+                model.eval()
+                eval_loss_val, tokens_num_val = 0,0 # Đổi tên biến
+                for batch_val in eval_dataloader:
+                    batch_val = tuple(t.to(device) for t in batch_val)
+                    source_ids_val,source_mask_val,target_ids_val,target_mask_val = batch_val                  
+                    with torch.no_grad():
+                        _,loss_val,num_val = model(source_ids=source_ids_val,source_mask=source_mask_val,
+                                           target_ids=target_ids_val,target_mask=target_mask_val)     
+                    if args.n_gpu > 1: loss_val = loss_val.mean()
+                    eval_loss_val += loss_val.item() * num_val.sum().item()
+                    tokens_num_val += num_val.sum().item()
+                
+                model.train()
+                eval_loss_val = eval_loss_val / tokens_num_val if tokens_num_val > 0 else 0
+                current_ppl = round(np.exp(eval_loss_val),5) if eval_loss_val > -float('inf') else float('inf')
+                
+                result = {'eval_ppl': current_ppl,
+                          'global_step': global_step, # global_step là số lần optimizer đã step
+                          'train_loss': round(loss.item(),5)} # Dùng loss của batch cuối cùng trước eval
+                for key in sorted(result.keys()):
+                    logger.info("  %s = %s", key, str(result[key]))
+                logger.info("  "+"*"*20)   
+                
+                #save last checkpoint (chỉ lưu model state)
+                last_output_dir = os.path.join(args.output_dir, 'checkpoint-last')
+                if not os.path.exists(last_output_dir): os.makedirs(last_output_dir)
+                model_to_save = model.module if hasattr(model, 'module') else model
+                output_model_file = os.path.join(last_output_dir, "pytorch_model.bin")
+                torch.save(model_to_save.state_dict(), output_model_file)                    
+                
+                if current_ppl < best_loss: # best_loss là best_ppl
+                    logger.info("  Best ppl improved from %.5f to %.5f", best_loss if best_loss != 1e6 else float('inf') , current_ppl)
+                    best_loss = current_ppl
+                    output_dir_best_ppl = os.path.join(args.output_dir, 'checkpoint-best-ppl')
+                    if not os.path.exists(output_dir_best_ppl): os.makedirs(output_dir_best_ppl)
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    output_model_file_ppl = os.path.join(output_dir_best_ppl, "pytorch_model.bin")
+                    torch.save(model_to_save.state_dict(), output_model_file_ppl)
+                    logger.info(f"Saved best PPL model to {output_model_file_ppl}")
+                            
+                #Calculate bleu  
+                if 'dev_bleu' in dev_dataset:
+                    eval_examples_b,eval_data_b=dev_dataset['dev_bleu']
+                else:
+                    eval_examples_b = read_examples(args.dev_filename)
+                    if not eval_examples_b: logger.warning(f"No dev examples for BLEU eval from {args.dev_filename}"); continue
+                    eval_examples_b = random.sample(eval_examples_b,min(1000,len(eval_examples_b)))
+                    eval_features_b = convert_examples_to_features(eval_examples_b, tokenizer, args,stage='test')
+                    all_source_ids_b = torch.tensor([f.source_ids for f in eval_features_b], dtype=torch.long)
+                    all_source_mask_b = torch.tensor([f.source_mask for f in eval_features_b], dtype=torch.long)    
+                    eval_data_b = TensorDataset(all_source_ids_b,all_source_mask_b)   
+                    dev_dataset['dev_bleu']=eval_examples_b,eval_data_b
+                
+                eval_sampler_b = SequentialSampler(eval_data_b)
+                eval_dataloader_b = DataLoader(eval_data_b, sampler=eval_sampler_b, batch_size=args.eval_batch_size)
 
-                          # --- Evaluation Logic ---
-                          if args.do_eval and args.local_rank in [-1, 0] and (global_step % args.eval_steps == 0) and eval_flag:
-                              # ... (phần eval giữ nguyên logic như file gốc của bạn, nhưng thực hiện trong rank 0) ...
-                                # Eval model with dev dataset
-                              tr_loss_val = 0 # Đặt lại tr_loss cho eval
-                              nb_tr_examples_val, nb_tr_steps_val = 0, 0
-                              eval_flag=False
-                              if 'dev_loss' in dev_dataset:
-                                  eval_examples,eval_data=dev_dataset['dev_loss']
-                              else:
-                                  eval_examples = read_examples(args.dev_filename)
-                                  eval_features = convert_examples_to_features(eval_examples, tokenizer, args,stage='dev')
-                                  all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
-                                  all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
-                                  all_target_ids = torch.tensor([f.target_ids for f in eval_features], dtype=torch.long)
-                                  all_target_mask = torch.tensor([f.target_mask for f in eval_features], dtype=torch.long)
-                                  eval_data = TensorDataset(all_source_ids,all_source_mask,all_target_ids,all_target_mask)
-                                  dev_dataset['dev_loss']=eval_examples,eval_data
-                              eval_sampler = SequentialSampler(eval_data)
-                              eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+                logger.info("\n***** Running BLEU evaluation on Dev Set *****")
+                logger.info("  Num examples = %d", len(eval_examples_b))
 
-                              logger.info("\n***** Running evaluation *****")
-                              logger.info("  Num examples = %d", len(eval_examples))
-                              logger.info("  Batch size = %d", args.eval_batch_size)
+                model.eval() 
+                p_dev=[]
+                for batch_b_dev in eval_dataloader_b:
+                    batch_b_dev = tuple(t.to(device) for t in batch_b_dev)
+                    source_ids_b,source_mask_b= batch_b_dev                  
+                    with torch.no_grad():
+                        preds = model(source_ids=source_ids_b,source_mask=source_mask_b)  
+                        for pred in preds:
+                            first_beam_output = pred[0]
+                            t=first_beam_output.cpu().numpy()
+                            t=list(t)
+                            if tokenizer.eos_token_id in t: t=t[:t.index(tokenizer.eos_token_id)]
+                            if t and t[0] == tokenizer.bos_token_id: t = t[1:]
+                            elif t and t[0] == tokenizer.cls_token_id: t = t[1:] # Một số tokenizer có thể dùng cls_token
+                            text = tokenizer.decode(t,clean_up_tokenization_spaces=False)
+                            p_dev.append(text)
+                model.train()
+                predictions_dev=[]
+                dev_output_fn = os.path.join(args.output_dir,"dev.output")
+                dev_gold_fn = os.path.join(args.output_dir,"dev.gold")
+                with open(dev_output_fn,'w', encoding='utf-8') as f_do, open(dev_gold_fn,'w', encoding='utf-8') as f_dg:
+                    for ref,gold in zip(p_dev,eval_examples_b):
+                        predictions_dev.append(str(gold.idx)+'\t'+ref)
+                        f_do.write(str(gold.idx)+'\t'+ref+'\n')
+                        f_dg.write(str(gold.idx)+'\t'+gold.target+'\n')     
 
-                              #Start Evaling model
-                              model.eval()
-                              eval_loss,tokens_num = 0,0
-                              for batch_eval in eval_dataloader: # Đổi tên biến batch
-                                  batch_eval = tuple(t.to(device) for t in batch_eval)
-                                  source_ids_eval,source_mask_eval,target_ids_eval,target_mask_eval = batch_eval
-
-                                  with torch.no_grad():
-                                      _,loss_eval,num = model(source_ids=source_ids_eval,source_mask=source_mask_eval,
-                                                         target_ids=target_ids_eval,target_mask=target_mask_eval)
-                                  if args.n_gpu > 1:
-                                      loss_eval = loss_eval.mean() # Xử lý multi-gpu loss
-                                  eval_loss += loss_eval.item() * num.sum().item() # Tính tổng loss theo token
-                                  tokens_num += num.sum().item()
-                              #Pring loss of dev dataset
-                              model.train()
-                              eval_loss = eval_loss / tokens_num if tokens_num > 0 else 0 # Tránh chia cho 0
-                              result = {'eval_ppl': round(np.exp(eval_loss),5) if eval_loss > -float('inf') else float('inf'), # Handle potential -inf
-                                        'global_step': global_step,
-                                        'train_loss': round(train_loss_avg,5)} # Sử dụng train_loss_avg
-                              for key in sorted(result.keys()):
-                                  logger.info("  %s = %s", key, str(result[key]))
-                              logger.info("  "+"*"*20)
-
-                              #save last checkpoint
-                              last_output_dir = os.path.join(args.output_dir, 'checkpoint-last')
-                              if not os.path.exists(last_output_dir):
-                                  os.makedirs(last_output_dir)
-                              model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-                              output_model_file = os.path.join(last_output_dir, "pytorch_model.bin")
-                              torch.save(model_to_save.state_dict(), output_model_file)
-                              if eval_loss<best_loss:
-                                  logger.info("  Best ppl:%s",round(np.exp(eval_loss),5))
-                                  logger.info("  "+"*"*20)
-                                  best_loss=eval_loss
-                                  # Save best checkpoint for best ppl
-                                  output_dir = os.path.join(args.output_dir, 'checkpoint-best-ppl')
-                                  if not os.path.exists(output_dir):
-                                      os.makedirs(output_dir)
-                                  model_to_save = model.module if hasattr(model, 'module') else model
-                                  output_model_file = os.path.join(output_dir, "pytorch_model.bin")
-                                  torch.save(model_to_save.state_dict(), output_model_file)
-
-
-                              #Calculate bleu
-                              if 'dev_bleu' in dev_dataset:
-                                  eval_examples_bleu,eval_data_bleu=dev_dataset['dev_bleu'] # Đổi tên biến
-                              else:
-                                  eval_examples_bleu = read_examples(args.dev_filename) # Đổi tên biến
-                                  eval_examples_bleu = random.sample(eval_examples_bleu,min(1000,len(eval_examples_bleu))) # Giảm kích thước sample để nhanh hơn
-                                  eval_features_bleu = convert_examples_to_features(eval_examples_bleu, tokenizer, args,stage='test') # Đổi tên biến
-                                  all_source_ids_bleu = torch.tensor([f.source_ids for f in eval_features_bleu], dtype=torch.long)
-                                  all_source_mask_bleu = torch.tensor([f.source_mask for f in eval_features_bleu], dtype=torch.long)
-                                  eval_data_bleu = TensorDataset(all_source_ids_bleu,all_source_mask_bleu) # Đổi tên biến
-                                  dev_dataset['dev_bleu']=eval_examples_bleu,eval_data_bleu
-
-
-                              eval_sampler_bleu = SequentialSampler(eval_data_bleu) # Đổi tên biến
-                              eval_dataloader_bleu = DataLoader(eval_data_bleu, sampler=eval_sampler_bleu, batch_size=args.eval_batch_size) # Đổi tên biến
-
-                              model.eval()
-                              p=[]
-                              for batch_bleu in eval_dataloader_bleu: # Đổi tên biến
-                                  batch_bleu = tuple(t.to(device) for t in batch_bleu)
-                                  source_ids_bleu,source_mask_bleu= batch_bleu
-                                  with torch.no_grad():
-                                      preds = model(source_ids=source_ids_bleu,source_mask=source_mask_bleu)
-                                      for pred in preds:
-                                          # Lấy beam đầu tiên (tốt nhất)
-                                          first_beam_output = pred[0]
-                                          t = first_beam_output.cpu().numpy()
-                                          t = list(t)
-                                          # Sử dụng eos_token_id của tokenizer thay vì số 0 cứng
-                                          if tokenizer.eos_token_id in t:
-                                             t = t[:t.index(tokenizer.eos_token_id)]
-                                          # Sử dụng bos_token_id của tokenizer thay vì cls_token_id
-                                          if tokenizer.bos_token_id in t:
-                                               t = t[t.index(tokenizer.bos_token_id)+1:]
-                                          text = tokenizer.decode(t, clean_up_tokenization_spaces=False)
-                                          p.append(text)
-                              model.train()
-                              predictions=[]
-                              dev_gold_path = os.path.join(args.output_dir, "dev.gold")
-                              dev_output_path = os.path.join(args.output_dir, "dev.output")
-
-                              with open(dev_output_path,'w', encoding='utf-8') as f, \
-                                   open(dev_gold_path,'w', encoding='utf-8') as f1:
-                                  for ref,gold in zip(p, eval_examples_bleu): # Dùng p (best candidate) để ghi file output
-                                      predictions.append(str(gold.idx)+'\t'+ref) # Dùng cho computeMaps
-                                      f.write(str(gold.idx)+'\t'+ref+'\n')
-                                      f1.write(str(gold.idx)+'\t'+gold.target+'\n')
-
-                              try:
-                                  (goldMap, predictionMap) = bleu.computeMaps(predictions, dev_gold_path)
-                                  dev_bleu=round(bleu.bleuFromMaps(goldMap, predictionMap)[0],2)
-                                  logger.info("  %s = %s "%("bleu-4",str(dev_bleu)))
-                              except Exception as e:
-                                  logger.error(f"Error calculating BLEU score: {e}", exc_info=True)
-                                  dev_bleu = 0.0 # Đặt giá trị mặc định
-
-                              logger.info("  "+"*"*20)
-                              if dev_bleu>best_bleu:
-                                  logger.info("  Best bleu:%s",dev_bleu)
-                                  logger.info("  "+"*"*20)
-                                  best_bleu=dev_bleu
-                                  # Save best checkpoint for best bleu
-                                  output_dir = os.path.join(args.output_dir, 'checkpoint-best-bleu')
-                                  if not os.path.exists(output_dir):
-                                      os.makedirs(output_dir)
-                                  model_to_save = model.module if hasattr(model, 'module') else model
-                                  output_model_file = os.path.join(output_dir, "pytorch_model.bin")
-                                  torch.save(model_to_save.state_dict(), output_model_file)
-                          # --- Kết thúc Evaluation Logic ---
-
-                      if args.max_steps > 0 and global_step >= args.max_steps:
-                          break # Thoát vòng lặp step bên trong nếu đạt max_steps
-                 if args.max_steps > 0 and global_step >= args.max_steps:
-                     break # Thoát vòng lặp epoch bên ngoài nếu đạt max_steps
-
-            # --- Logic cũ cho lặp theo steps (cần xem lại nếu bạn dùng max_steps) ---
-            # else: # Lặp theo step
-            #    # ... (logic tương tự như lặp theo epoch nhưng không có vòng lặp epoch_iterator) ...
-            #    # Lấy batch trực tiếp
-            #     batch = next(train_dataloader_iter)
-            #     model.train()
-            #     batch = tuple(t.to(device) for t in batch)
-            #     source_ids,source_mask,target_ids,target_mask = batch
-            #     # ... (tính loss, backward, ...)
-            #     # ... (update optimizer, scheduler, global_step)
-            #     # ... (evaluation logic giống như trên khi global_step % args.eval_steps == 0)
-
-
-    # --- Phần Test (Thêm Debugging và sửa lỗi tính EM) ---
+                current_dev_bleu = 0.0
+                try:
+                    if os.path.exists(dev_gold_fn) and predictions_dev:
+                        (goldMap_dev, predictionMap_dev) = bleu.computeMaps(predictions_dev, dev_gold_fn) 
+                        current_dev_bleu=round(bleu.bleuFromMaps(goldMap_dev, predictionMap_dev)[0],2)
+                        logger.info("  %s = %s "%("dev_bleu-4",str(current_dev_bleu)))
+                    else:
+                         logger.warning("Could not compute dev BLEU. Gold file or predictions missing.")
+                except Exception as e:
+                    logger.error(f"Error calculating dev BLEU: {e}", exc_info=True)
+                
+                logger.info("  "+"*"*20)    
+                if current_dev_bleu > best_bleu:
+                    logger.info("  Best dev bleu improved from %s to %s", best_bleu, current_dev_bleu)
+                    best_bleu=current_dev_bleu
+                    output_dir_best_bleu = os.path.join(args.output_dir, 'checkpoint-best-bleu')
+                    if not os.path.exists(output_dir_best_bleu): os.makedirs(output_dir_best_bleu)
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    output_model_file_bleu = os.path.join(output_dir_best_bleu, "pytorch_model.bin")
+                    torch.save(model_to_save.state_dict(), output_model_file_bleu)
+                    logger.info(f"Saved best BLEU model to {output_model_file_bleu}")
+            
+            if global_step >= num_train_optimization_steps: # Thêm kiểm tra này để thoát sớm nếu đã đạt tổng số step
+                logger.info(f"Reached total optimization steps {num_train_optimization_steps}. Stopping training.")
+                break 
+        # Kết thúc vòng lặp training
+               
     if args.do_test:
+        print("DEBUG: Entered do_test block.", flush=True)
         files=[]
-        # Chỉ thêm file nếu nó được cung cấp và tồn tại
         if args.dev_filename is not None and os.path.exists(args.dev_filename):
+            logger.info(f"Adding dev file for testing: {args.dev_filename}")
             files.append(args.dev_filename)
         if args.test_filename is not None and os.path.exists(args.test_filename):
+            logger.info(f"Adding test file for testing: {args.test_filename}")
             files.append(args.test_filename)
+
+        if not files:
+            logger.warning("No valid dev or test files provided for do_test. Skipping test phase.")
         else:
-             logger.warning(f"Test filename {args.test_filename} not provided or does not exist.")
+            for file_idx, file_path in enumerate(files): 
+                logger.info("***** Running testing on %s *****", file_path)
+                print(f"DEBUG: Testing on file: {file_path}", flush=True)
+
+                eval_examples = read_examples(file_path)
+                if not eval_examples:
+                    logger.error(f"Could not read examples from {file_path}. Skipping testing for this file.")
+                    continue
+
+                eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='test')
+                all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
+                all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
+                eval_data = TensorDataset(all_source_ids, all_source_mask)
+
+                eval_sampler = SequentialSampler(eval_data)
+                eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
+                model.eval()
+                p = [] 
+                print(f"DEBUG: Starting evaluation loop for file: {file_path}", flush=True)
+                for batch in tqdm(eval_dataloader, total=len(eval_dataloader), desc=f"Eval bleu for test set {file_idx}"):
+                    batch = tuple(t.to(device) for t in batch)
+                    source_ids, source_mask = batch
+                    with torch.no_grad():
+                        preds = model(source_ids=source_ids, source_mask=source_mask) 
+                        if not isinstance(preds, list):
+                             logger.warning(f"Model output 'preds' is not a list (type: {type(preds)}). Attempting to handle for batch.")
+                             if isinstance(preds, torch.Tensor) and preds.ndim >= 2 : 
+                                 # Giả sử preds là [batch_size, num_beams, seq_len] hoặc [batch_size, seq_len]
+                                 temp_preds = []
+                                 for i in range(preds.size(0)):
+                                     if preds.ndim == 3: # có beam
+                                         temp_preds.append([preds[i,0,:]]) # Lấy beam đầu tiên
+                                     else: # không có beam
+                                         temp_preds.append([preds[i,:]])
+                                 preds = temp_preds
+                             else:
+                                 logger.error("Cannot process non-list preds of this shape. Skipping batch.")
+                                 for _ in range(source_ids.size(0)): p.append("")
+                                 continue
 
 
-        for file_idx, file in enumerate(files): # Đổi tên biến idx thành file_idx
-            logger.info("***** Running testing on %s *****", file)
-            eval_examples = read_examples(file)
-            if not eval_examples: # Kiểm tra nếu đọc file bị lỗi
-                logger.error(f"Could not read examples from {file}. Skipping testing.")
-                continue
-
-            eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='test')
-            all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
-            all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
-            eval_data = TensorDataset(all_source_ids,all_source_mask) # Target không cần thiết cho input test
-
-            eval_sampler = SequentialSampler(eval_data)
-            eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
-            model.eval()
-            p = [] # Danh sách dự đoán tốt nhất (best candidate)
-            print(f"DEBUG: Starting evaluation loop for file: {file}", flush=True)
-            # Vòng lặp tạo dự đoán
-            for batch in tqdm(eval_dataloader, total=len(eval_dataloader), desc=f"Eval bleu for test set {file_idx}"):
-                batch = tuple(t.to(device) for t in batch)
-                source_ids, source_mask = batch
-                with torch.no_grad():
-                    # Giả sử model() trả về danh sách các beam cho mỗi input
-                    # preds có thể là list[list[tensor]] hoặc cấu trúc khác tùy model.Seq2Seq
-                    preds = model(source_ids=source_ids, source_mask=source_mask)
-                    if not isinstance(preds, list): # Xử lý nếu preds không phải list
-                         logger.warning("Model output 'preds' is not a list. Attempting to handle.")
-                         # Cố gắng chuyển đổi hoặc xử lý tùy theo cấu trúc thực tế
-                         if isinstance(preds, torch.Tensor):
-                             preds = preds.tolist() # Ví dụ nếu là tensor
-                         else:
-                             preds = [] # Bỏ qua batch này nếu không xử lý được
-
-                    for pred_beams in preds: # pred_beams là list các beam cho một input
-                        best_candidate_text = ""
-                        # Kiểm tra pred_beams là list và không rỗng
-                        if isinstance(pred_beams, list) and pred_beams:
-                             # Giả sử beam đầu tiên là tốt nhất
-                            first_beam_output = pred_beams[0]
-                            # Kiểm tra first_beam_output là tensor
-                            if isinstance(first_beam_output, torch.Tensor):
-                                t = first_beam_output.cpu().numpy()
-                                t = list(t)
-                                # Chuẩn hóa việc cắt token EOS
-                                if tokenizer.eos_token_id in t:
-                                    t = t[:t.index(tokenizer.eos_token_id)]
-                                # Bỏ token BOS nếu có (một số model thêm vào đầu)
-                                if t and t[0] == tokenizer.bos_token_id:
-                                     t = t[1:]
-                                # Bỏ token CLS nếu có (một số model thêm vào đầu)
-                                elif t and t[0] == tokenizer.cls_token_id:
-                                     t = t[1:]
-                                best_candidate_text = tokenizer.decode(t, clean_up_tokenization_spaces=False)
+                        for pred_beams_for_one_item in preds: 
+                            best_candidate_text = ""
+                            if isinstance(pred_beams_for_one_item, list) and pred_beams_for_one_item:
+                                first_beam_output_tensor = pred_beams_for_one_item[0] 
+                                if isinstance(first_beam_output_tensor, torch.Tensor):
+                                    t = first_beam_output_tensor.cpu().numpy()
+                                    t = list(t)
+                                    if tokenizer.eos_token_id in t:
+                                        t = t[:t.index(tokenizer.eos_token_id)]
+                                    if t and t[0] == tokenizer.bos_token_id : 
+                                        t = t[1:]
+                                    elif t and t[0] == tokenizer.cls_token_id: 
+                                        t = t[1:]
+                                    best_candidate_text = tokenizer.decode(t, clean_up_tokenization_spaces=False)
+                                else:
+                                    logger.warning(f"Beam output is not a tensor, but {type(first_beam_output_tensor)}")
                             else:
-                                logger.warning(f"Unexpected type for beam output: {type(first_beam_output)}")
-                        else:
-                             logger.warning(f"Unexpected structure or empty beam list for a prediction: {pred_beams}")
+                                logger.warning(f"Prediction for an item is not a list or is empty: {pred_beams_for_one_item}")
+                            p.append(best_candidate_text)
+                print(f"DEBUG: Finished evaluation loop for {file_path}. Generated predictions: {len(p)}", flush=True)
 
-                        p.append(best_candidate_text) # Thêm dự đoán tốt nhất
+                if len(p) != len(eval_examples):
+                    logger.error(f"CRITICAL: Mismatch in predictions ({len(p)}) and examples ({len(eval_examples)}) for {file_path}. Metrics will be incorrect.")
+                else:
+                    logger.info(f"Number of predictions matches number of examples for {file_path}.")
 
-            print(f"DEBUG: Finished evaluation loop. Generated predictions: {len(p)}", flush=True)
+                file_basename = os.path.basename(file_path).rsplit('.', 1)[0] 
+                output_file_path = os.path.join(args.output_dir, f"{file_basename}.output")
+                gold_file_path = os.path.join(args.output_dir, f"{file_basename}.gold")
 
-            # --- Ghi File và Tính Metrics ---
-            if len(p) != len(eval_examples):
-                 logger.error(f"CRITICAL ERROR: Mismatch between number of predictions ({len(p)}) and examples ({len(eval_examples)}) for file {file}. Skipping metrics calculation.")
-                 continue # Bỏ qua file này nếu số lượng không khớp
+                print(f"DEBUG: Writing output to {output_file_path} and gold to {gold_file_path}...", flush=True)
+                predictions_for_bleu_compute = [] 
+                try:
+                    with open(output_file_path,'w', encoding='utf-8') as f_out, \
+                         open(gold_file_path,'w', encoding='utf-8') as f_gold:
+                        for pred_text, gold_example in zip(p, eval_examples):
+                            clean_pred_text = pred_text.strip()
+                            clean_gold_target = gold_example.target.strip()
+                            f_out.write(str(gold_example.idx) + '\t' + clean_pred_text + '\n')
+                            f_gold.write(str(gold_example.idx) + '\t' + clean_gold_target + '\n')
+                            predictions_for_bleu_compute.append(str(gold_example.idx) + '\t' + clean_pred_text)
+                    print(f"DEBUG: Finished writing files for {file_path}.", flush=True)
+                except IOError as e:
+                    print(f"ERROR writing output/gold files for {file_path}: {e}", flush=True)
+                    logger.error(f"Error writing files for {file_path}: {e}", exc_info=True)
+                    continue 
 
-            # Ghi file output (chứa best candidate) và file gold
-            # Sử dụng tên file duy nhất cho mỗi tập test
-            file_basename = os.path.basename(file).replace('.jsonl', '').replace('.json', '')
-            output_file_path = os.path.join(args.output_dir, f"{file_basename}.output")
-            gold_file_path = os.path.join(args.output_dir, f"{file_basename}.gold")
-
-            print(f"DEBUG: Writing output to {output_file_path} and gold to {gold_file_path}...", flush=True)
-            predictions_for_bleu_compute = [] # Cần format "idx\tpred" cho bleu.computeMaps
-            try:
-                with open(output_file_path,'w', encoding='utf-8') as f_out, \
-                     open(gold_file_path,'w', encoding='utf-8') as f_gold:
-                    for pred_text, gold_example in zip(p, eval_examples):
-                        # Ghi best candidate vào file output
-                        f_out.write(str(gold_example.idx) + '\t' + pred_text + '\n')
-                        f_gold.write(str(gold_example.idx) + '\t' + gold_example.target + '\n')
-                        predictions_for_bleu_compute.append(str(gold_example.idx) + '\t' + pred_text)
-                print("DEBUG: Finished writing files.", flush=True)
-            except IOError as e:
-                 print(f"ERROR writing output/gold files: {e}", flush=True)
-                 logger.error(f"Error writing files for {file}: {e}", exc_info=True)
-                 continue # Bỏ qua tính toán metrics nếu ghi file lỗi
-
-
-            # Tính BLEU
-            print("DEBUG: Computing BLEU...", flush=True)
-            dev_bleu = 0.0 # Giá trị mặc định
-            try:
-                # Đảm bảo file gold tồn tại trước khi tính
+                # Tính BLEU
+                print(f"DEBUG: Computing BLEU for {file_path}...", flush=True)
+                current_bleu_score = 0.0
                 if os.path.exists(gold_file_path) and predictions_for_bleu_compute:
-                    # Sử dụng predictions_for_bleu_compute đã tạo
-                    (goldMap, predictionMap) = bleu.computeMaps(predictions_for_bleu_compute, gold_file_path)
-                    dev_bleu = round(bleu.bleuFromMaps(goldMap, predictionMap)[0], 2)
-                    print(f"DEBUG: BLEU computed: {dev_bleu}", flush=True)
+                    try:
+                        (goldMap, predictionMap) = bleu.computeMaps(predictions_for_bleu_compute, gold_file_path)
+                        current_bleu_score = round(bleu.bleuFromMaps(goldMap, predictionMap)[0], 2)
+                        print(f"DEBUG: BLEU computed for {file_path}: {current_bleu_score}", flush=True)
+                    except Exception as e:
+                        print(f"ERROR during BLEU computation for {file_path}: {e}", flush=True)
+                        logger.error(f"ERROR during BLEU computation for {file_path}:", exc_info=True)
+                        current_bleu_score = 0.0
                 elif not os.path.exists(gold_file_path):
-                     logger.error(f"Gold file {gold_file_path} not found for BLEU calculation.")
-                else: # predictions_for_bleu_compute rỗng
-                     logger.error(f"Prediction list is empty for BLEU calculation.")
+                    logger.error(f"Gold file {gold_file_path} not found for BLEU calculation.")
+                else:
+                    logger.error(f"Prediction list is empty for BLEU calculation on {file_path}.")
 
-            except Exception as e:
-                print(f"ERROR during BLEU computation: {e}", flush=True)
-                logger.error("ERROR during BLEU computation:", exc_info=True)
-                dev_bleu = 0.0 # Gán giá trị mặc định
 
-            # Tính EM
-            print("DEBUG: Computing EM...", flush=True)
-            match_count = 0
-            for pred_text, gold_example in zip(p, eval_examples):
-                 pred_clean = pred_text.strip()
-                 gold_clean = gold_example.target.strip()
-                 if pred_clean == gold_clean:
-                     match_count += 1
-            exact_match_score = (match_count / len(eval_examples)) * 100 if len(eval_examples) > 0 else 0.0
-            print(f"DEBUG: EM computed: {exact_match_score:.2f}", flush=True)
+                # Tính EM
+                print(f"DEBUG: Computing EM for {file_path}...", flush=True)
+                match_count = 0
+                if len(p) == len(eval_examples): 
+                    for pred_text, gold_example in zip(p, eval_examples):
+                        pred_clean = pred_text.strip()
+                        gold_clean = gold_example.target.strip()
+                        if pred_clean == gold_clean:
+                            match_count += 1
+                    exact_match_score = (match_count / len(eval_examples)) * 100 if len(eval_examples) > 0 else 0.0
+                else:
+                    logger.warning(f"Skipping EM calculation for {file_path} due to prediction/example count mismatch.")
+                    exact_match_score = 0.0 
+                print(f"DEBUG: EM computed for {file_path}: {exact_match_score:.2f}", flush=True)
 
-            # --- In kết quả cuối cùng ---
-            print("DEBUG: Logging final results...", flush=True)
-            logger.info("***** Results for %s *****", file) # Log tên file
-            logger.info("  %s = %s", "BLEU-4", str(dev_bleu))
-            logger.info("  %s = %.2f%%", "EM", exact_match_score)
-            logger.info("  "+"*"*20)
-            print("DEBUG: Finished logging final results.", flush=True)
-            # --- Kết thúc In kết quả ---
+                # --- In kết quả cuối cùng ---
+                print(f"DEBUG: Logging final results for {file_path}...", flush=True)
+                logger.info("***** Results for %s *****", file_path)
+                logger.info("  %s = %s", "BLEU-4", str(current_bleu_score))
+                logger.info("  %s = %.2f%%", "EM", exact_match_score)
+                logger.info("  "+"*"*20)
+                print(f"DEBUG: Finished logging final results for {file_path}.", flush=True)
 
 
 if __name__ == "__main__":
