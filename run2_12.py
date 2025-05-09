@@ -264,7 +264,24 @@ def main():
                   sos_id=tokenizer.cls_token_id,eos_id=tokenizer.sep_token_id)
     if args.load_model_path is not None:
         logger.info("reload model from {}".format(args.load_model_path))
-        model.load_state_dict(torch.load(args.load_model_path))
+        # Kiểm tra xem thiết bị đích là gì
+        # Nếu bạn chắc chắn muốn chạy trên CPU hoặc CUDA không khả dụng:
+        if not torch.cuda.is_available() or args.no_cuda: # Thêm điều kiện args.no_cuda nếu bạn muốn ép CPU
+            device_to_load_on = torch.device('cpu')
+            logger.info(f"CUDA not available or no_cuda flag set. Loading model to CPU.")
+        else:
+            device_to_load_on = device # Sử dụng device đã được xác định trước đó (GPU nếu có)
+            logger.info(f"Loading model to {device_to_load_on}.")
+    
+        try:
+            # Sử dụng map_location và weights_only=True
+            model.load_state_dict(torch.load(args.load_model_path, map_location=device_to_load_on, weights_only=True))
+        except RuntimeError as e:
+            # Nếu weights_only=True gây lỗi (ví dụ file lưu không chỉ là weights)
+            # thì thử lại với weights_only=False (ít an toàn hơn)
+            logger.warning(f"Failed to load with weights_only=True: {e}. Retrying with weights_only=False.")
+            logger.warning("Be cautious if loading from an untrusted source when weights_only=False.")
+            model.load_state_dict(torch.load(args.load_model_path, map_location=device_to_load_on, weights_only=False))
         
     model.to(device)
     if args.local_rank != -1:
