@@ -1,4 +1,4 @@
-mkdir -p model/code2review_t5_data_task2
+
 
 CUDA_VISIBLE_DEVICES=0 python run_12.py --do_train --do_eval --model_type roberta      \
      	--model_name_or_path microsoft/codebert-base   \
