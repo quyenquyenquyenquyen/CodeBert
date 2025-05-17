@@ -33,7 +33,7 @@ import numpy as np
 from io import open
 from itertools import cycle
 import torch.nn as nn
-from model import Seq2Seq
+from model import Seq2Seq # Giả sử model.py tồn tại và đúng
 from tqdm import tqdm, trange
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler,TensorDataset
 from torch.utils.data.distributed import DistributedSampler
@@ -74,7 +74,6 @@ def read_examples(filename):
                 logger.warning(f"Skipping invalid JSON line {idx+1} in {filename}: {line}")
                 continue
 
-            # Use 'idx' from json if available and it's an int, otherwise use enumerate idx
             try:
                 example_idx = int(js.get('idx', idx))
             except ValueError:
@@ -112,7 +111,7 @@ class InputFeatures(object):
     def __init__(self,
                  example_id,
                  source_ids,
-                 target_ids, # Note: target_ids are for labels (training/PPL), not direct decoder input for model.py's inference
+                 target_ids,
                  source_mask,
                  target_mask,
 
@@ -127,7 +126,6 @@ class InputFeatures(object):
 def convert_examples_to_features(examples, tokenizer, args,stage=None):
     features = []
     for example_index, example in enumerate(examples):
-        #source
         source_tokens = tokenizer.tokenize(example.source)[:args.max_source_length-2]
         source_tokens =[tokenizer.cls_token]+source_tokens+[tokenizer.sep_token]
         source_ids =  tokenizer.convert_tokens_to_ids(source_tokens)
@@ -136,30 +134,11 @@ def convert_examples_to_features(examples, tokenizer, args,stage=None):
         source_ids+=[tokenizer.pad_token_id]*padding_length
         source_mask+=[0]*padding_length
 
-        #target (mainly for labels in training, or PPL calculation)
-        # model.py's Seq2Seq.forward with target_ids=None handles its own generation start.
-        if stage=="test": # For testing, target_ids are not fed to model's generation loop
-            target_tokens_for_feature = [] # Dummy, as model.py won't use it for generation
-            target_ids_for_feature = [tokenizer.pad_token_id] * args.max_target_length # Placeholder
+        if stage=="test":
+            target_ids_for_feature = [tokenizer.pad_token_id] * args.max_target_length
             target_mask_for_feature = [0] * args.max_target_length
-        else: # For train or dev (PPL eval)
+        else:
             target_tokens_for_feature = tokenizer.tokenize(example.target)[:args.max_target_length-2]
-            # model.py's Seq2Seq.forward (training branch) expects target_ids that are shifted labels
-            # The processing here is for creating labels for the CrossEntropyLoss
-            # The model itself handles the SOS token implicitly or via its Beam class for generation
-            # For Roberta, typically CLS is SOS, SEP is EOS.
-            # model.py's Seq2Seq takes sos_id=tokenizer.cls_token_id, eos_id=tokenizer.sep_token_id
-            # For training labels, decoder input should start with SOS, and labels should be original target
-            
-            # Create labels (target_ids for loss)
-            # These should align with how model.py calculates loss
-            # model.py's training branch:
-            # tgt_embeddings = self.encoder.embeddings(target_ids).permute([1,0,2]).contiguous()
-            # shift_labels = target_ids[..., 1:].contiguous()
-            # This implies target_ids passed to model.py should be like [SOS, token1, token2, ..., EOS, PAD...]
-            # And then it shifts for prediction.
-            
-            # So, target_ids for features should be [SOS, token1, ..., EOS, PAD...]
             processed_target_tokens = [tokenizer.cls_token] + target_tokens_for_feature + [tokenizer.sep_token]
             target_ids_for_feature = tokenizer.convert_tokens_to_ids(processed_target_tokens)
             target_mask_for_feature = [1] * len(target_ids_for_feature)
@@ -167,22 +146,22 @@ def convert_examples_to_features(examples, tokenizer, args,stage=None):
             target_ids_for_feature += [tokenizer.pad_token_id] * padding_length_target
             target_mask_for_feature += [0] * padding_length_target
 
-        if example_index < 1 and stage=='train': # Log only for the first example in train
+        if example_index < 1 and stage=='train':
             logger.info("*** Example ***")
             logger.info("idx: {}".format(example.idx))
-
             logger.info("source_tokens: {}".format([x.replace('\u0120','_') for x in source_tokens]))
             logger.info("source_ids: {}".format(' '.join(map(str, source_ids))))
             logger.info("source_mask: {}".format(' '.join(map(str, source_mask))))
-
             if stage != 'test':
-                logger.info("target_tokens (for feature): {}".format([x.replace('\u0120','_') for x in target_tokens_for_feature]))
+                # Original target tokens (before adding CLS/SEP for feature)
+                target_tokens_display = tokenizer.tokenize(example.target)[:args.max_target_length-2]
+                logger.info("target_tokens (raw for display): {}".format([x.replace('\u0120','_') for x in target_tokens_display]))
                 logger.info("target_ids (for feature/label): {}".format(' '.join(map(str, target_ids_for_feature))))
                 logger.info("target_mask (for feature/label): {}".format(' '.join(map(str, target_mask_for_feature))))
 
         features.append(
             InputFeatures(
-                 example.idx, # Use original example.idx
+                 example.idx,
                  source_ids,
                  target_ids_for_feature,
                  source_mask,
@@ -210,8 +189,8 @@ def main():
     parser.add_argument("--test_filename", default=None, type=str, help="The test filename")
     parser.add_argument("--config_name", default="", type=str, help="Pretrained config name or path if not the same as model_name")
     parser.add_argument("--tokenizer_name", default="", type=str, help="Pretrained tokenizer name or path if not the same as model_name")
-    parser.add_argument("--max_source_length", default=256, type=int, help="Max source sequence length") # Increased default
-    parser.add_argument("--max_target_length", default=128, type=int, help="Max target sequence length") # Increased default
+    parser.add_argument("--max_source_length", default=256, type=int, help="Max source sequence length")
+    parser.add_argument("--max_target_length", default=128, type=int, help="Max target sequence length")
     parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--do_test", action='store_true', help="Whether to run eval on the test set.")
@@ -225,7 +204,7 @@ def main():
     parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight deay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--num_train_epochs", default=10.0, type=float, help="Total number of training epochs to perform.") # Increased default
+    parser.add_argument("--num_train_epochs", default=10.0, type=float, help="Total number of training epochs to perform.")
     parser.add_argument("--max_steps", default=-1, type=int, help="If > 0: total training steps. Overrides num_train_epochs.")
     parser.add_argument("--eval_steps", default=-1, type=int, help="Run evaluation every X steps (global steps).")
     parser.add_argument("--train_steps", default=-1, type=int, help="Alias for max_steps (for compatibility).")
@@ -256,51 +235,62 @@ def main():
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,do_lower_case=args.do_lower_case)
 
     encoder = model_class.from_pretrained(args.model_name_or_path,config=config)
-    # Decoder Layer: model.py permutes, so no batch_first=True here
     decoder_layer = nn.TransformerDecoderLayer(d_model=config.hidden_size, nhead=config.num_attention_heads)
-    # Get num_decoder_layers from config if available, else default (e.g., 6 or 12)
-    # model.py currently hardcodes decoder layers in its internal structure (implicitly if not passed)
-    # For consistency, let's assume model.py's decoder structure matches encoder or a common value like 6 or 12.
-    # If model.py's decoder has a fixed number of layers (e.g. 6), use that. Otherwise, config.num_hidden_layers is a common choice.
-    num_decoder_layers = getattr(config, "num_decoder_layers", 6) # Default to 6 if not in config, or match encoder
+    num_decoder_layers = getattr(config, "num_decoder_layers", config.num_hidden_layers) # Match encoder layers if not specified
     logger.info(f"Using {num_decoder_layers} layers for the Transformer Decoder.")
     decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
     model = Seq2Seq(encoder=encoder,decoder=decoder,config=config,
                   beam_size=args.beam_size,max_length=args.max_target_length,
-                  sos_id=tokenizer.cls_token_id,eos_id=tokenizer.sep_token_id) # model.py uses sep_token_id as eos
+                  sos_id=tokenizer.cls_token_id,eos_id=tokenizer.sep_token_id)
 
     if args.load_model_path is not None:
         logger.info("Reloading model from {}".format(args.load_model_path))
         device_to_load_on = torch.device('cpu') if args.no_cuda or not torch.cuda.is_available() else device
         logger.info(f"Attempting to load model to {device_to_load_on}.")
         try:
-            model.load_state_dict(torch.load(args.load_model_path, map_location=device_to_load_on))
-            logger.info("Model loaded successfully (direct load).")
+            # SỬA ĐỔI 1: Thêm weights_only=True
+            model.load_state_dict(torch.load(args.load_model_path, map_location=device_to_load_on, weights_only=True))
+            logger.info("Model loaded successfully (direct load with weights_only=True).")
         except RuntimeError as e:
-            logger.warning(f"Failed to load model directly: {e}. Trying alternatives.")
+            logger.warning(f"Failed to load model directly with weights_only=True: {e}. Trying alternatives.")
+            # Trường hợp này thường là do state_dict lưu tên có 'module.'
+            # Thử tải state_dict trước (vẫn với weights_only=True), rồi xử lý key
             try:
-                logger.info("Retrying with weights_only=True.")
-                model.load_state_dict(torch.load(args.load_model_path, map_location=device_to_load_on, weights_only=True))
-                logger.info("Model loaded successfully (weights_only=True).")
-            except Exception as e_weights_only:
-                logger.warning(f"Failed to load with weights_only=True: {e_weights_only}. Trying to remove 'module.' prefix.")
-                try:
-                    state_dict = torch.load(args.load_model_path, map_location=device_to_load_on)
-                    from collections import OrderedDict
-                    new_state_dict = OrderedDict()
+                logger.info("Trying to load state_dict and remove 'module.' prefix.")
+                # SỬA ĐỔI 2: Thêm weights_only=True
+                state_dict = torch.load(args.load_model_path, map_location=device_to_load_on, weights_only=True)
+                from collections import OrderedDict
+                new_state_dict = OrderedDict()
+                has_module_prefix = any(k.startswith('module.') for k in state_dict.keys())
+                if has_module_prefix:
+                    logger.info("Detected 'module.' prefix in state_dict keys. Removing it.")
                     for k, v in state_dict.items():
                         name = k[7:] if k.startswith('module.') else k
                         new_state_dict[name] = v
                     model.load_state_dict(new_state_dict)
-                    logger.info("Model loaded successfully (after removing 'module.' prefix).")
-                except Exception as e_module:
-                    logger.error(f"Failed to load by removing 'module.' prefix: {e_module}. Model loading failed.")
+                else:
+                    # Nếu không có 'module.' prefix và vẫn lỗi ở try đầu, có thể do key không khớp
+                    # Hoặc state_dict không tương thích hoàn toàn.
+                    # Lần thử này có thể vẫn dùng state_dict gốc nếu không có module.
+                    logger.info("No 'module.' prefix detected, attempting to load original state_dict again (should have failed above if keys matched).")
+                    model.load_state_dict(state_dict) # Thử lại với state_dict đã tải
+
+                logger.info("Model loaded successfully (after 'module.' prefix handling or direct state_dict load).")
+            except Exception as e_module:
+                logger.error(f"Failed to load by removing 'module.' prefix or direct state_dict: {e_module}. Model loading failed.")
+                # Cân nhắc: Thử lại lần cuối với weights_only=False nếu các phương án an toàn thất bại và người dùng chấp nhận rủi ro
+                # logger.warning("Attempting to load with weights_only=False as a last resort (potential security risk).")
+                # try:
+                #     model.load_state_dict(torch.load(args.load_model_path, map_location=device_to_load_on, weights_only=False)) # Mặc định là False
+                #     logger.info("Model loaded with weights_only=False (last resort).")
+                # except Exception as e_unsafe:
+                #     logger.error(f"All model loading attempts failed. Last error (weights_only=False): {e_unsafe}")
     model.to(device)
 
     if args.local_rank != -1:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank,
-                                                          find_unused_parameters=True) # Set to True if model has unused params
+                                                          find_unused_parameters=True)
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
@@ -351,7 +341,31 @@ def main():
         #       # ... (rest of BLEU calculation from p_bleu and eval_examples_bleu) ...
         # =====================================================================================
         logger.warning("Full 'do_train' logic needs to be pasted here from a previous version and adapted.")
-        pass # REMOVE THIS PASS AND PASTE THE do_train LOGIC
+        logger.warning("The current 'do_train' block is a placeholder.")
+        # Placeholder for do_train logic:
+        if args.train_filename:
+            logger.info("***** Running training *****")
+            logger.info("  Num examples = (not implemented)")
+            logger.info("  Batch size = %d", args.train_batch_size)
+            logger.info("  Num Epochs = %d", args.num_train_epochs)
+            logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+            logger.info("  Total optimization steps = (not implemented)")
+
+            # Example: Create a dummy optimizer and scheduler if needed for structure
+            # no_decay = ['bias', 'LayerNorm.weight']
+            # optimizer_grouped_parameters = [
+            #     {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            #      'weight_decay': args.weight_decay},
+            #     {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+            # ]
+            # optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+            # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps,
+            #                                             num_training_steps=100) # Replace 100 with actual total steps
+
+            logger.info("  Training logic is not fully implemented in this script version.")
+        else:
+            logger.error("Training filename not provided. Cannot start training.")
+        # END OF PLACEHOLDER do_train
 
 
     if args.do_test:
@@ -370,126 +384,113 @@ def main():
 
         if not files_to_test:
             logger.warning("No valid files specified for --do_test. Exiting test phase.")
-            return
+            # return # Commented out to allow program to finish if only do_test was called with no files
+        else:
+            logger.info("***** Running testing *****")
+            for file_idx, current_file_to_test in enumerate(files_to_test):
+                logger.info("="*50)
+                file_basename = os.path.basename(current_file_to_test)
+                logger.info(f"Processing file (idx={file_idx}, name={file_basename}): {current_file_to_test}")
 
-        for file_idx, current_file_to_test in enumerate(files_to_test):
-            logger.info("="*50)
-            file_basename = os.path.basename(current_file_to_test)
-            logger.info(f"Processing file (idx={file_idx}, name={file_basename}): {current_file_to_test}")
-
-            eval_examples = read_examples(current_file_to_test)
-            if not eval_examples:
-                logger.error(f"No examples read from file: {current_file_to_test}. Skipping evaluation for this file.")
-                continue
-
-            eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='test')
-            all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
-            all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
-            eval_data = TensorDataset(all_source_ids,all_source_mask) # Only source for inference
-
-            eval_sampler = SequentialSampler(eval_data)
-            eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size, num_workers=min(4, os.cpu_count() // 2 if os.cpu_count() else 1))
-
-            model.eval()
-            p_test = []
-            logger.info(f"Starting prediction generation for {file_basename}...")
-            for batch_data in tqdm(eval_dataloader,total=len(eval_dataloader), desc=f"Predicting for {file_basename}"):
-                # Batch data only contains source_ids and source_mask for testing
-                source_ids_test, source_mask_test = tuple(t.to(device) for t in batch_data)
-                with torch.no_grad():
-                    batch_preds_beams = model(source_ids=source_ids_test, source_mask=source_mask_test)
-                    # batch_preds_beams shape: [batch_size, beam_size, max_length]
-
-                    for i in range(batch_preds_beams.size(0)):
-                        best_beam_ids = batch_preds_beams[i, 0, :].cpu().numpy() # Top beam
-
-                        token_ids_for_decode = []
-                        for token_id_val in best_beam_ids:
-                            # model.py's Beam.buildTargetTokens doesn't include SOS.
-                            # model.py's Seq2Seq.forward pads with zero tensor.
-                            # Roberta: cls_token_id=0 (SOS for model.py), sep_token_id=2 (EOS for model.py), pad_token_id=1
-                            
-                            if token_id_val == tokenizer.sep_token_id: # EOS used by model.py's Beam
-                                token_ids_for_decode.append(token_id_val) # Include EOS for skip_special_tokens
-                                break
-                            
-                            # Check for padding 0 from model.py's zero tensor
-                            # This should only happen AFTER some actual tokens, not if 0 is the SOS/CLS token
-                            if token_id_val == 0 and token_ids_for_decode: # If 0 appears after other tokens, it's padding
-                                break
-                            # If 0 is the very first token and it's not the cls_token (unlikely scenario)
-                            elif token_id_val == 0 and not token_ids_for_decode and token_id_val != tokenizer.cls_token_id:
-                                break
-                            
-                            # Roberta's actual pad_token_id is 1. If model.py somehow used it, stop.
-                            if token_id_val == tokenizer.pad_token_id:
-                                break
-                                
-                            token_ids_for_decode.append(token_id_val)
-                        
-                        # skip_special_tokens=True should handle removing CLS (0), SEP (2), PAD (1)
-                        text = tokenizer.decode(token_ids_for_decode, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-                        p_test.append(text)
-            logger.info(f"Finished prediction generation for {file_basename}. Generated {len(p_test)} predictions.")
-
-            if len(p_test) != len(eval_examples):
-                logger.error(f"Mismatch in number of predictions ({len(p_test)}) and examples ({len(eval_examples)}) for file {current_file_to_test}. Skipping EM and BLEU.")
-                continue
-
-            exact_matches_test = []
-            predictions_for_bleu_test_file = []
-            output_file_path_test = os.path.join(args.output_dir, f"test_{file_idx}_{os.path.splitext(file_basename)[0]}.output") # Use file_idx and cleaned basename
-            gold_file_path_test = os.path.join(args.output_dir, f"test_{file_idx}_{os.path.splitext(file_basename)[0]}.gold")
-
-            logger.info(f"Writing predictions to: {output_file_path_test}")
-            logger.info(f"Writing gold references to: {gold_file_path_test}")
-
-            with open(output_file_path_test, 'w', encoding='utf-8') as f_out, \
-                 open(gold_file_path_test, 'w', encoding='utf-8') as f_gold:
-                for i_pred, (pred_text, gold_example) in enumerate(zip(p_test, eval_examples)):
-                    normalized_pred_em = pred_text.strip().lower()
-                    normalized_gold_em = gold_example.target.strip().lower()
-                    is_em = (normalized_pred_em == normalized_gold_em)
-                    exact_matches_test.append(is_em)
-
-                    f_out.write(str(gold_example.idx) + '\t' + pred_text.replace('\n', ' ').strip() + '\n')
-                    f_gold.write(str(gold_example.idx) + '\t' + gold_example.target.replace('\n', ' ').strip() + '\n')
-                    predictions_for_bleu_test_file.append(str(gold_example.idx) + '\t' + pred_text.replace('\n', ' ').strip())
-            logger.info(f"Finished writing files for {file_basename}.")
-
-            if exact_matches_test:
-                em_score_test = np.mean(exact_matches_test) * 100
-                num_em_correct_test = sum(exact_matches_test)
-                logger.info(f"  Exact Match (EM) for {file_basename} = {em_score_test:.2f}% ({num_em_correct_test}/{len(exact_matches_test)})")
-            else:
-                logger.info(f"  Exact Match (EM) for {file_basename} = N/A (no predictions to compare)")
-            logger.info("  " + "*" * 20)
-
-            if not predictions_for_bleu_test_file:
-                logger.error(f"No predictions formatted for BLEU for file {file_basename}. Skipping BLEU.")
-                continue
-            logger.info(f"Calculating BLEU for {file_basename} using {len(predictions_for_bleu_test_file)} predictions and gold file {gold_file_path_test}")
-            try:
-                if not os.path.exists(gold_file_path_test) or os.path.getsize(gold_file_path_test) == 0:
-                    logger.error(f"Gold file {gold_file_path_test} is missing or empty. Cannot compute BLEU.")
+                eval_examples = read_examples(current_file_to_test)
+                if not eval_examples:
+                    logger.error(f"No examples read from file: {current_file_to_test}. Skipping evaluation for this file.")
                     continue
-                (goldMap, predictionMap) = bleu.computeMaps(predictions_for_bleu_test_file, gold_file_path_test)
-                if goldMap is None or predictionMap is None or not goldMap or not predictionMap:
-                     logger.error(f"computeMaps did not return valid maps for {file_basename}. Skipping BLEU.")
-                     continue
-                bleu_score_results_test = bleu.bleuFromMaps(goldMap, predictionMap)
-                if bleu_score_results_test and isinstance(bleu_score_results_test, (list, tuple)) and len(bleu_score_results_test) > 0:
-                    current_bleu_score = round(bleu_score_results_test[0], 2)
-                    logger.info("  %s for %s = %s " % ("bleu-4", file_basename, str(current_bleu_score)))
+
+                eval_features = convert_examples_to_features(eval_examples, tokenizer, args, stage='test')
+                all_source_ids = torch.tensor([f.source_ids for f in eval_features], dtype=torch.long)
+                all_source_mask = torch.tensor([f.source_mask for f in eval_features], dtype=torch.long)
+                eval_data = TensorDataset(all_source_ids,all_source_mask)
+
+                eval_sampler = SequentialSampler(eval_data)
+                eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size, num_workers=min(4, os.cpu_count() // 2 if os.cpu_count() else 1))
+
+                model.eval()
+                p_test = []
+                logger.info(f"Starting prediction generation for {file_basename}...")
+                for batch_data in tqdm(eval_dataloader,total=len(eval_dataloader), desc=f"Predicting for {file_basename}"):
+                    source_ids_test, source_mask_test = tuple(t.to(device) for t in batch_data)
+                    with torch.no_grad():
+                        batch_preds_beams = model(source_ids=source_ids_test, source_mask=source_mask_test)
+                        for i in range(batch_preds_beams.size(0)):
+                            best_beam_ids = batch_preds_beams[i, 0, :].cpu().numpy()
+                            token_ids_for_decode = []
+                            for token_id_val in best_beam_ids:
+                                if token_id_val == tokenizer.sep_token_id:
+                                    token_ids_for_decode.append(token_id_val)
+                                    break
+                                if token_id_val == 0 and token_ids_for_decode:
+                                    break
+                                elif token_id_val == 0 and not token_ids_for_decode and token_id_val != tokenizer.cls_token_id:
+                                    break
+                                if token_id_val == tokenizer.pad_token_id: # Roberta pad_token_id
+                                    # Only break if it's not the first token (pad can be 0 for some tokenizers)
+                                    # And it's not the cls_token if cls_token is also pad_token
+                                    if token_ids_for_decode or token_id_val != tokenizer.cls_token_id :
+                                        break
+                                token_ids_for_decode.append(token_id_val)
+                            text = tokenizer.decode(token_ids_for_decode, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                            p_test.append(text)
+                logger.info(f"Finished prediction generation for {file_basename}. Generated {len(p_test)} predictions.")
+
+                if len(p_test) != len(eval_examples):
+                    logger.error(f"Mismatch in number of predictions ({len(p_test)}) and examples ({len(eval_examples)}) for file {current_file_to_test}. Skipping EM and BLEU.")
+                    continue
+
+                exact_matches_test = []
+                predictions_for_bleu_test_file = []
+                output_file_path_test = os.path.join(args.output_dir, f"test_{file_idx}_{os.path.splitext(file_basename)[0]}.output")
+                gold_file_path_test = os.path.join(args.output_dir, f"test_{file_idx}_{os.path.splitext(file_basename)[0]}.gold")
+
+                logger.info(f"Writing predictions to: {output_file_path_test}")
+                logger.info(f"Writing gold references to: {gold_file_path_test}")
+
+                with open(output_file_path_test, 'w', encoding='utf-8') as f_out, \
+                     open(gold_file_path_test, 'w', encoding='utf-8') as f_gold:
+                    for i_pred, (pred_text, gold_example) in enumerate(zip(p_test, eval_examples)):
+                        normalized_pred_em = pred_text.strip().lower()
+                        normalized_gold_em = gold_example.target.strip().lower()
+                        is_em = (normalized_pred_em == normalized_gold_em)
+                        exact_matches_test.append(is_em)
+
+                        f_out.write(str(gold_example.idx) + '\t' + pred_text.replace('\n', ' ').strip() + '\n')
+                        f_gold.write(str(gold_example.idx) + '\t' + gold_example.target.replace('\n', ' ').strip() + '\n')
+                        predictions_for_bleu_test_file.append(str(gold_example.idx) + '\t' + pred_text.replace('\n', ' ').strip())
+                logger.info(f"Finished writing files for {file_basename}.")
+
+                if exact_matches_test:
+                    em_score_test = np.mean(exact_matches_test) * 100
+                    num_em_correct_test = sum(exact_matches_test)
+                    logger.info(f"  Exact Match (EM) for {file_basename} = {em_score_test:.2f}% ({num_em_correct_test}/{len(exact_matches_test)})")
                 else:
-                    logger.error(f"bleuFromMaps did not return a valid BLEU score for {file_basename}. Result: {bleu_score_results_test}")
+                    logger.info(f"  Exact Match (EM) for {file_basename} = N/A (no predictions to compare)")
                 logger.info("  " + "*" * 20)
-            except Exception as e:
-                logger.error(f"ERROR calculating BLEU for file {file_basename}: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-            logger.info("="*50)
-        logger.info("***** Testing finished *****")
+
+                if not predictions_for_bleu_test_file:
+                    logger.error(f"No predictions formatted for BLEU for file {file_basename}. Skipping BLEU.")
+                    continue
+                logger.info(f"Calculating BLEU for {file_basename} using {len(predictions_for_bleu_test_file)} predictions and gold file {gold_file_path_test}")
+                try:
+                    if not os.path.exists(gold_file_path_test) or os.path.getsize(gold_file_path_test) == 0:
+                        logger.error(f"Gold file {gold_file_path_test} is missing or empty. Cannot compute BLEU.")
+                        continue
+                    (goldMap, predictionMap) = bleu.computeMaps(predictions_for_bleu_test_file, gold_file_path_test)
+                    if goldMap is None or predictionMap is None or not goldMap or not predictionMap:
+                         logger.error(f"computeMaps did not return valid maps for {file_basename}. Skipping BLEU.")
+                         continue
+                    bleu_score_results_test = bleu.bleuFromMaps(goldMap, predictionMap)
+                    if bleu_score_results_test and isinstance(bleu_score_results_test, (list, tuple)) and len(bleu_score_results_test) > 0:
+                        current_bleu_score = round(bleu_score_results_test[0], 2)
+                        logger.info("  %s for %s = %s " % ("bleu-4", file_basename, str(current_bleu_score)))
+                    else:
+                        logger.error(f"bleuFromMaps did not return a valid BLEU score for {file_basename}. Result: {bleu_score_results_test}")
+                    logger.info("  " + "*" * 20)
+                except Exception as e:
+                    logger.error(f"ERROR calculating BLEU for file {file_basename}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                logger.info("="*50)
+            logger.info("***** Testing finished *****")
 
 if __name__ == "__main__":
     main()
